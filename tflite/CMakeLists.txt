@@ -189,6 +189,25 @@ if (NOT CMAKE_SYSTEM_PROCESSOR OR CMAKE_SYSTEM_PROCESSOR MATCHES "x86")
   find_package(NEON_2_SSE REQUIRED)
   list(APPEND TFLITE_TARGET_DEPENDENCIES NEON_2_SSE::NEON_2_SSE)
 endif()
+
+# RISC-V architecture detection and configuration
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+  message(STATUS "Detected RISC-V 64-bit architecture")
+  set(TFLITE_RISCV64 ON)
+  
+  # Check if RVV 1.0 is supported
+  option(TFLITE_ENABLE_RVV "Enable RISC-V Vector Extension (RVV 1.0) optimizations" ON)
+  
+  if(TFLITE_ENABLE_RVV)
+    message(STATUS "RVV 1.0 optimizations enabled")
+    # Add RVV compiler flags
+    list(APPEND TFLITE_TARGET_PUBLIC_OPTIONS "-DTFLITE_RISCV_RVV")
+    # Note: -march=rv64gcv should be set via toolchain file or CMAKE_C_FLAGS/CMAKE_CXX_FLAGS
+  else()
+    message(STATUS "RVV 1.0 optimizations disabled, using scalar fallback")
+  endif()
+endif()
+
 find_package(cpuinfo REQUIRED)  #CPUINFO is used by XNNPACK and RUY library
 find_package(ml_dtypes REQUIRED)
 find_package(ruy REQUIRED)
@@ -538,6 +557,12 @@ if(TFLITE_ENABLE_XNNPACK)
   if (NOT CMAKE_SYSTEM_PROCESSOR OR CMAKE_SYSTEM_PROCESSOR MATCHES "x86")
     find_package(NEON_2_SSE REQUIRED)
     list(APPEND XNNPACK_NEON_2_SSE NEON_2_SSE::NEON_2_SSE)
+  endif()
+  
+  # RISC-V specific XNNPACK configuration
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    message(STATUS "Configuring XNNPACK for RISC-V architecture")
+    # XNNPACK should handle RVV detection internally via cpuinfo
   endif()
   populate_tflite_source_vars("delegates/xnnpack"
     TFLITE_DELEGATES_XNNPACK_SRCS
