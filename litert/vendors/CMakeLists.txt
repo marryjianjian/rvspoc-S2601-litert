@@ -53,6 +53,8 @@ if(NOT NEUROPILOT_HEADERS_DIR)
         break()
       endif()
     endforeach()
+    # Persist to CMakeCache so subsequent cmake runs skip re-download.
+    set(NEUROPILOT_HEADERS_DIR "${NEUROPILOT_HEADERS_DIR}" CACHE PATH "Path to pre-downloaded NeuroPilot headers (root containing neuron/api)" FORCE)
     message(STATUS "NeuroPilot headers at: ${NEUROPILOT_HEADERS_DIR}")
   endif()
 endif()
@@ -92,6 +94,8 @@ if(NOT QAIRT_HEADERS_DIR)
       break()
     endif()
   endforeach()
+  # Persist to CMakeCache so subsequent cmake runs skip re-download.
+  set(QAIRT_HEADERS_DIR "${QAIRT_HEADERS_DIR}" CACHE PATH "Path to pre-downloaded QAIRT/QNN headers (root containing Qnn*.h)" FORCE)
   message(STATUS "QAIRT/QNN headers at: ${QAIRT_HEADERS_DIR}")
 endif()
 
@@ -127,6 +131,8 @@ if(NOT LITECORE_HEADERS_DIR)
       break()
     endif()
   endforeach()
+  # Persist to CMakeCache so subsequent cmake runs skip re-download.
+  set(LITECORE_HEADERS_DIR "${LITECORE_HEADERS_DIR}" CACHE PATH "Path to Samsung AI LiteCore headers (root containing graph_wrapper_api.h)" FORCE)
   message(STATUS "Samsung AI LiteCore headers at: ${LITECORE_HEADERS_DIR}")
 endif()
 
