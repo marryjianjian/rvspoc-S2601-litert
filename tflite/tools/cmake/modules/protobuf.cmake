@@ -30,7 +30,27 @@ set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
 set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
-set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
+if(CMAKE_CROSSCOMPILING)
+  # When cross-compiling, do not build protoc for the target architecture.
+  # protoc is a host tool; a host-native protoc must be available.
+  # It is set by litert/CMakeLists.txt or via -DProtobuf_PROTOC_EXECUTABLE=...
+  if(NOT Protobuf_PROTOC_EXECUTABLE OR NOT EXISTS "${Protobuf_PROTOC_EXECUTABLE}")
+    find_program(Protobuf_PROTOC_EXECUTABLE NAMES protoc)
+  endif()
+  if(NOT Protobuf_PROTOC_EXECUTABLE)
+    message(FATAL_ERROR
+      "protoc not found on the host system. When cross-compiling, a host-native"
+      " protoc is required to generate .pb.cc/.pb.h files during the build."
+      " Please install protobuf on the host, e.g.:\n"
+      "  brew install protobuf          (macOS)\n"
+      "  apt install protobuf-compiler  (Ubuntu/Debian)\n"
+      "Alternatively, set -DProtobuf_PROTOC_EXECUTABLE=/path/to/host/protoc"
+    )
+  endif()
+  set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE BOOL "" FORCE)
+else()
+  set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
+endif()
 
 OverridableFetchContent_GetProperties(protobuf)
 if(NOT protobuf_POPULATED)
@@ -47,4 +67,9 @@ if(NOT TARGET protobuf::libprotobuf)
   add_subdirectory(${protobuf_SOURCE_DIR} ${protobuf_BINARY_DIR})
 endif()
 
-set(Protobuf_PROTOC_EXECUTABLE protoc CACHE INTERNAL "")
+if(CMAKE_CROSSCOMPILING)
+  # Already resolved above; log the path being used.
+  message(STATUS "Cross-compiling: using host protoc: ${Protobuf_PROTOC_EXECUTABLE}")
+else()
+  set(Protobuf_PROTOC_EXECUTABLE protoc CACHE INTERNAL "")
+endif()

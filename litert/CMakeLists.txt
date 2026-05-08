@@ -158,6 +158,108 @@ if(CMAKE_CROSSCOMPILING)
       set(TFLITE_HOST_TOOLS_DIR "${_root_host_flatc_dir}/_deps/flatbuffers-build" CACHE PATH "Host tools directory")
     endif()
   endif()
+
+  # Build or reuse a host protoc for cross compilation.
+  # Follows the same pattern as the flatc handling above.
+  if(NOT Protobuf_PROTOC_EXECUTABLE OR NOT EXISTS "${Protobuf_PROTOC_EXECUTABLE}")
+    set(_host_protoc "")
+    # Check TFLITE_HOST_TOOLS_DIR first.
+    if(TFLITE_HOST_TOOLS_DIR)
+      find_program(_host_protoc protoc
+        HINTS "${TFLITE_HOST_TOOLS_DIR}" "${TFLITE_HOST_TOOLS_DIR}/bin"
+        NO_DEFAULT_PATH)
+    endif()
+    # Then check system PATH.
+    if(NOT _host_protoc)
+      find_program(_host_protoc NAMES protoc)
+    endif()
+    # Otherwise, build from source.
+    if(NOT _host_protoc)
+      set(_root_host_protoc_dir "${CMAKE_CURRENT_SOURCE_DIR}/../host_protoc_build")
+      # protobuf FetchContent builds protoc inside _deps/protobuf-build/.
+      file(GLOB _cached_protoc "${_root_host_protoc_dir}/_deps/protobuf-build/protoc")
+      if(_cached_protoc)
+        set(_host_protoc "${_cached_protoc}")
+        message(STATUS "Reusing host protoc from ${_host_protoc}")
+      else()
+        file(MAKE_DIRECTORY "${_root_host_protoc_dir}")
+        file(WRITE "${_root_host_protoc_dir}/CMakeLists.txt"
+          "cmake_minimum_required(VERSION 3.16)\n"
+          "project(HostProtoc LANGUAGES C CXX)\n"
+          "include(FetchContent)\n"
+          "FetchContent_Declare(protobuf\n"
+          "  GIT_REPOSITORY https://github.com/protocolbuffers/protobuf\n"
+          "  GIT_TAG 90b73ac3f0b10320315c2ca0d03a5a9b095d2f66\n"
+          "  GIT_SUBMODULES_RECURSE TRUE\n"
+          ")\n"
+          "set(protobuf_ABSL_PROVIDER \"module\" CACHE STRING \"\" FORCE)\n"
+          "set(protobuf_BUILD_TESTS OFF CACHE BOOL \"\" FORCE)\n"
+          "set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL \"\" FORCE)\n"
+          "set(protobuf_INSTALL OFF CACHE BOOL \"\" FORCE)\n"
+          "set(protobuf_WITH_ZLIB OFF CACHE BOOL \"\" FORCE)\n"
+          "set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL \"\" FORCE)\n"
+          "FetchContent_MakeAvailable(protobuf)\n"
+        )
+        set(_litert_host_protoc_cmake_args -S . -B . -DCMAKE_BUILD_TYPE=Release)
+        set(_litert_host_c_compiler "${LITERT_HOST_C_COMPILER}")
+        if(NOT _litert_host_c_compiler)
+          if(EXISTS "/usr/bin/clang")
+            set(_litert_host_c_compiler "/usr/bin/clang")
+          else()
+            find_program(_litert_host_c_compiler NAMES clang cc gcc)
+          endif()
+        endif()
+        if(_litert_host_c_compiler)
+          list(APPEND _litert_host_protoc_cmake_args -DCMAKE_C_COMPILER=${_litert_host_c_compiler})
+        endif()
+        set(_litert_host_cxx_compiler "${LITERT_HOST_CXX_COMPILER}")
+        if(NOT _litert_host_cxx_compiler)
+          if(EXISTS "/usr/bin/clang++")
+            set(_litert_host_cxx_compiler "/usr/bin/clang++")
+          else()
+            find_program(_litert_host_cxx_compiler NAMES clang++ c++ g++)
+          endif()
+        endif()
+        if(_litert_host_cxx_compiler)
+          list(APPEND _litert_host_protoc_cmake_args -DCMAKE_CXX_COMPILER=${_litert_host_cxx_compiler})
+        endif()
+        execute_process(
+          COMMAND ${CMAKE_COMMAND} ${_litert_host_protoc_cmake_args}
+          WORKING_DIRECTORY "${_root_host_protoc_dir}"
+          RESULT_VARIABLE _protoc_cfg_rc
+          ERROR_VARIABLE _protoc_cfg_err)
+        if(NOT _protoc_cfg_rc EQUAL 0)
+          message(FATAL_ERROR "Failed to configure host protobuf:\n${_protoc_cfg_err}")
+        endif()
+        execute_process(
+          COMMAND ${CMAKE_COMMAND} --build . --target protoc -- -j${CMAKE_BUILD_PARALLEL_LEVEL}
+          WORKING_DIRECTORY "${_root_host_protoc_dir}"
+          RESULT_VARIABLE _protoc_build_rc
+          ERROR_VARIABLE _protoc_build_err)
+        if(NOT _protoc_build_rc EQUAL 0)
+          message(FATAL_ERROR "Failed to build host protoc:\n${_protoc_build_err}")
+        endif()
+        # find_program caches results, so a stale NOTFOUND from a previous
+        # run would cause failure even after a successful build.  Use a direct
+        # filesystem check instead.
+        file(GLOB _protoc_glob "${_root_host_protoc_dir}/_deps/protobuf-build/protoc*")
+        foreach(_candidate IN LISTS _protoc_glob)
+          get_filename_component(_candidate_name "${_candidate}" NAME)
+          if(NOT _candidate_name MATCHES "\\.cmake$|\\.cc$|\\.h$")
+            set(_host_protoc "${_candidate}")
+            break()
+          endif()
+        endforeach()
+        if(NOT _host_protoc)
+          message(FATAL_ERROR "Host protoc built but not found in ${_root_host_protoc_dir}/_deps/protobuf-build")
+        endif()
+      endif()
+    endif()
+    if(_host_protoc)
+      set(Protobuf_PROTOC_EXECUTABLE "${_host_protoc}" CACHE FILEPATH "Host protoc executable" FORCE)
+      message(STATUS "Host protoc for cross-compilation: ${Protobuf_PROTOC_EXECUTABLE}")
+    endif()
+  endif()
 endif()
 
 # Add TFLite as a subdirectory
@@ -171,16 +273,16 @@ endif()
 
 # Get TensorFlow source directory from TFLite build
 if(EXISTS "${TFLITE_BUILD_DIR}")
-    include("${TFLITE_BUILD_DIR}/tensorflow_src_dir.cmake" OPTIONAL)
+  include("${TFLITE_BUILD_DIR}/tensorflow_src_dir.cmake" OPTIONAL)
 endif()
 
 # Set default TensorFlow source directory if not found
 if(NOT TENSORFLOW_SOURCE_DIR)
-    if(EXISTS "${TFLITE_BUILD_DIR}/tensorflow-src")
-        set(TENSORFLOW_SOURCE_DIR "${TFLITE_BUILD_DIR}/tensorflow-src")
-    else()
-        message(FATAL_ERROR "TensorFlow source directory not found. Please build TFLite first or set TENSORFLOW_SOURCE_DIR")
-    endif()
+  if(EXISTS "${TFLITE_BUILD_DIR}/tensorflow-src")
+    set(TENSORFLOW_SOURCE_DIR "${TFLITE_BUILD_DIR}/tensorflow-src")
+  else()
+    message(FATAL_ERROR "TensorFlow source directory not found. Please build TFLite first or set TENSORFLOW_SOURCE_DIR")
+  endif()
 endif()
 
 message(STATUS "Using TensorFlow source directory: ${TENSORFLOW_SOURCE_DIR}")
@@ -196,12 +298,12 @@ include_directories(
 list(APPEND CMAKE_MODULE_PATH "${TFLITE_SOURCE_DIR}/tools/cmake/modules")
 
 if(EXISTS "${CMAKE_BINARY_DIR}/opencl_headers")
-    include_directories(${CMAKE_BINARY_DIR}/opencl_headers)
+  include_directories(${CMAKE_BINARY_DIR}/opencl_headers)
 endif()
 
 # Add FP16 headers include directory
 if(EXISTS "${CMAKE_BINARY_DIR}/FP16-source/include")
-    include_directories(${CMAKE_BINARY_DIR}/FP16-source/include)
+  include_directories(${CMAKE_BINARY_DIR}/FP16-source/include)
 endif()
 
 # Find FlatBuffers
@@ -226,13 +328,13 @@ find_package(absl REQUIRED)
 
 # Platform detection
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(LITERT_PLATFORM_MACOS ON)
+  set(LITERT_PLATFORM_MACOS ON)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(LITERT_PLATFORM_LINUX ON)
+  set(LITERT_PLATFORM_LINUX ON)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    set(LITERT_PLATFORM_WINDOWS ON)
+  set(LITERT_PLATFORM_WINDOWS ON)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Android")
-    set(LITERT_PLATFORM_ANDROID ON)
+  set(LITERT_PLATFORM_ANDROID ON)
 endif()
 
 # Find required packages
