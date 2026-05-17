@@ -54,6 +54,7 @@ limitations under the License.
 #include "tflite/kernels/internal/cppmath.h"
 #include "tflite/kernels/internal/optimized/im2col_utils.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/optimized/optimized_ops_utils.h"
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
@@ -1515,7 +1516,22 @@ inline void AddElementwise(int size, const ArithmeticParams& params,
     x = vminq_f32(activation_max, x);
     vst1q_f32(output_data + i, x);
   }
-#endif  // NEON
+#elif defined(USE_RVV)
+  // RVV implementation: uses vsetvl for automatic tail handling.
+  const float act_min = params.float_activation_min;
+  const float act_max = params.float_activation_max;
+  size_t vl;
+  for (; i < size;) {
+    vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t a = __riscv_vle32_v_f32m4(input1_data + i, vl);
+    vfloat32m4_t b = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t x = __riscv_vfadd_vv_f32m4(a, b, vl);
+    x = __riscv_vfmax_vf_f32m4(x, act_min, vl);
+    x = __riscv_vfmin_vf_f32m4(x, act_max, vl);
+    __riscv_vse32_v_f32m4(output_data + i, x, vl);
+    i += vl;
+  }
+#endif  // USE_NEON / USE_RVV
 
   for (; i < size; i++) {
     auto x = input1_data[i] + input2_data[i];
@@ -1752,7 +1768,21 @@ inline void AddScalarBroadcast(int size, const ArithmeticParams& params,
                   vminq_f32(output_activation_max_vector, output));
     vst1q_f32(output_data + i, clamped);
   }
-#endif  // NEON
+#elif defined(USE_RVV)
+  // RVV implementation: vector + scalar broadcast add with clamp.
+  const float act_min = params.float_activation_min;
+  const float act_max = params.float_activation_max;
+  size_t vl;
+  for (; i < size;) {
+    vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t b = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t x = __riscv_vfadd_vf_f32m4(b, broadcast_value, vl);
+    x = __riscv_vfmax_vf_f32m4(x, act_min, vl);
+    x = __riscv_vfmin_vf_f32m4(x, act_max, vl);
+    __riscv_vse32_v_f32m4(output_data + i, x, vl);
+    i += vl;
+  }
+#endif  // USE_NEON / USE_RVV
 
   for (; i < size; ++i) {
     auto x = broadcast_value + input2_data[i];

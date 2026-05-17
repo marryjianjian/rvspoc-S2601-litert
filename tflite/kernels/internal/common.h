@@ -34,6 +34,7 @@ limitations under the License.
 #include "tflite/core/macros.h"
 #include "tflite/kernels/internal/cppmath.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {
@@ -247,7 +248,25 @@ inline void BiasAndClamp(float clamp_min, float clamp_max, int bias_size,
                                                   clamp_min, clamp_max);
     }
   }
-#else  // not NEON
+#elif defined(USE_RVV)
+  // RVV implementation: vector add + clamp for bias application.
+  float* array_ptr = array_data;
+  float* array_end_ptr = array_ptr + array_size;
+  for (; array_ptr != array_end_ptr; array_ptr += bias_size) {
+    int i = 0;
+    size_t vl;
+    for (; i < bias_size;) {
+      vl = __riscv_vsetvl_e32m4(bias_size - i);
+      vfloat32m4_t b = __riscv_vle32_v_f32m4(bias_data + i, vl);
+      vfloat32m4_t a = __riscv_vle32_v_f32m4(array_ptr + i, vl);
+      vfloat32m4_t x = __riscv_vfadd_vv_f32m4(a, b, vl);
+      x = __riscv_vfmax_vf_f32m4(x, clamp_min, vl);
+      x = __riscv_vfmin_vf_f32m4(x, clamp_max, vl);
+      __riscv_vse32_v_f32m4(array_ptr + i, x, vl);
+      i += vl;
+    }
+  }
+#else
   for (int array_offset = 0; array_offset < array_size;
        array_offset += bias_size) {
     for (int i = 0; i < bias_size; i++) {

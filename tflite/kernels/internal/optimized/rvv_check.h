@@ -16,7 +16,9 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_RVV_CHECK_H_
 
 // RISC-V Vector Extension (RVV 1.0) detection
-#if defined(__riscv) && defined(__riscv_vector)
+// Requires TFLITE_RISCV_RVV to be defined (set by CMake via -DTFLITE_RISCV_RVV)
+// to be consistent with arch_check.h detection.
+#if defined(__riscv) && defined(__riscv_vector) && defined(TFLITE_RISCV_RVV)
 #define USE_RVV
 #include <riscv_vector.h>  // IWYU pragma: export
 #endif
