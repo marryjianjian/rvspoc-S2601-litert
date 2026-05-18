@@ -317,6 +317,7 @@ set(TEST_WITH_GTEST_MAIN_LIST
   cpu_backend_gemm_test.cc
   cpu_backend_threadpool_test.cc
   eigen_support_test.cc
+  internal/optimized/rvv_ops_test.cc
   kernel_util_test.cc
   optional_tensor_test.cc
   subgraph_test_util_test.cc

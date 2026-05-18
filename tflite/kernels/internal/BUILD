@@ -1260,6 +1260,7 @@ cc_library(
     hdrs = [
         "optimized/cpu_check.h",
         "optimized/neon_check.h",
+        "optimized/rvv_check.h",
         "optimized/sse_check.h",
     ],
     compatible_with = get_compatible_with_portable(),
@@ -1344,6 +1345,16 @@ cc_test(
     deps = [
         ":common",
         ":reduce_utils",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "rvv_ops_test",
+    srcs = ["optimized/rvv_ops_test.cc"],
+    deps = [
+        ":common",
+        ":optimized_base",
         "@com_google_googletest//:gtest_main",
     ],
 )

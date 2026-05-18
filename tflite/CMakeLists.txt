@@ -92,6 +92,7 @@ option(TFLITE_ENABLE_XNNPACK "Enable XNNPACK backend" ON)
 option(TFLITE_ENABLE_EXTERNAL_DELEGATE "Enable External Delegate backend" ON)
 
 option(TFLITE_KERNEL_TEST "Enable tflite kernel unit test" OFF)
+option(TFLITE_ENABLE_RVV_TESTS "Build targeted RVV correctness tests" OFF)
 
 if(${CMAKE_CROSSCOMPILING})
   set(TFLITE_HOST_TOOLS_DIR "" CACHE PATH "Host tools directory")
@@ -258,7 +259,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang$")
   list(APPEND TF_TARGET_PRIVATE_OPTIONS "-Wno-deprecated-declarations")
 endif()
 # Additional compiler flags used when compiling TF Lite.
-set(TFLITE_TARGET_PUBLIC_OPTIONS "-DEIGEN_NEON_GEBP_NR=4")
+list(PREPEND TFLITE_TARGET_PUBLIC_OPTIONS "-DEIGEN_NEON_GEBP_NR=4")
 set(TFLITE_TARGET_PRIVATE_OPTIONS "")
 set(TFLITE_TARGET_PRIVATE_DEFINITIONS "")
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang$")
@@ -816,6 +817,26 @@ target_compile_definitions(tensorflow-lite
     TF_VERSION_SUFFIX=""
 )
 add_library(${PROJECT_NAME}::tensorflowlite ALIAS tensorflow-lite)
+
+if(TFLITE_ENABLE_RVV_TESTS)
+  find_package(googletest REQUIRED)
+
+  add_executable(tensorflow-lite-rvv-ops-test
+    ${TFLITE_SOURCE_DIR}/kernels/internal/optimized/rvv_ops_test.cc
+  )
+  target_link_libraries(tensorflow-lite-rvv-ops-test
+    tensorflow-lite
+    gmock
+    gtest_main
+  )
+
+  if(NOT CMAKE_CROSSCOMPILING)
+    enable_testing()
+    add_test(NAME tensorflow-lite-rvv-ops-test
+      COMMAND tensorflow-lite-rvv-ops-test
+    )
+  endif()
+endif()
 
 # The install targets.
 if(TFLITE_ENABLE_INSTALL)
