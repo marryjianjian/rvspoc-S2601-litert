@@ -55,6 +55,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/im2col_utils.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
+#include "tflite/kernels/internal/optimized/rvv_ops.h"
 #include "tflite/kernels/internal/optimized/optimized_ops_utils.h"
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
@@ -1616,6 +1617,54 @@ inline void AddElementwise(int size, const ArithmeticParams& params,
                 vmin_u8(output_activation_max_vector, vqmovun_s16(s)));
     vst1_u8(output_data + i, clamped);
   }
+#elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vuint8m1_t input1_u8 =
+        __riscv_vle8_v_u8m1(input1_data + i, vl);
+    const vuint8m1_t input2_u8 =
+        __riscv_vle8_v_u8m1(input2_data + i, vl);
+    const vuint16m2_t input1_u16 = __riscv_vzext_vf2_u16m2(input1_u8, vl);
+    const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
+    const vint32m4_t input1 = __riscv_vadd_vx_i32m4(
+        __riscv_vreinterpret_v_u32m4_i32m4(
+            __riscv_vzext_vf2_u32m4(input1_u16, vl)),
+        params.input1_offset, vl);
+    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
+        __riscv_vreinterpret_v_u32m4_i32m4(
+            __riscv_vzext_vf2_u32m4(input2_u16, vl)),
+        params.input2_offset, vl);
+
+    const vint32m4_t shifted_input1 =
+        __riscv_vsll_vx_i32m4(input1, params.left_shift, vl);
+    const vint32m4_t shifted_input2 =
+        __riscv_vsll_vx_i32m4(input2, params.left_shift, vl);
+    const vint32m4_t scaled_input1 =
+        rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            shifted_input1, params.input1_multiplier, params.input1_shift,
+            vl);
+    const vint32m4_t scaled_input2 =
+        rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            shifted_input2, params.input2_multiplier, params.input2_shift,
+            vl);
+    const vint32m4_t raw_sum =
+        __riscv_vadd_vv_i32m4(scaled_input1, scaled_input2, vl);
+    vint32m4_t raw_output =
+        rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            raw_sum, params.output_multiplier, params.output_shift, vl);
+    raw_output =
+        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
+    raw_output = __riscv_vmax_vx_i32m4(
+        raw_output, params.quantized_activation_min, vl);
+    raw_output = __riscv_vmin_vx_i32m4(
+        raw_output, params.quantized_activation_max, vl);
+
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
+                        narrowed_i8, vl);
+    i += vl;
+  }
 #endif  // NEON
 
   for (; i < size; ++i) {
@@ -1713,6 +1762,46 @@ inline void AddScalarBroadcast(int size, const ArithmeticParams& params,
         vmax_u8(output_activation_min_vector,
                 vmin_u8(output_activation_max_vector, vqmovun_s16(s)));
     vst1_u8(output_data + i, clamped);
+  }
+#elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  const int32_t input1_val = params.input1_offset + input1_data;
+  const int32_t shifted_input1_val = input1_val * (1 << params.left_shift);
+  const int32_t scaled_input1_val =
+      MultiplyByQuantizedMultiplierSmallerThanOneExp(
+          shifted_input1_val, params.input1_multiplier, params.input1_shift);
+
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vuint8m1_t input2_u8 =
+        __riscv_vle8_v_u8m1(input2_data + i, vl);
+    const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
+    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
+        __riscv_vreinterpret_v_u32m4_i32m4(
+            __riscv_vzext_vf2_u32m4(input2_u16, vl)),
+        params.input2_offset, vl);
+    const vint32m4_t shifted_input2 =
+        __riscv_vsll_vx_i32m4(input2, params.left_shift, vl);
+    const vint32m4_t scaled_input2 =
+        rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            shifted_input2, params.input2_multiplier, params.input2_shift,
+            vl);
+    const vint32m4_t raw_sum =
+        __riscv_vadd_vx_i32m4(scaled_input2, scaled_input1_val, vl);
+    vint32m4_t raw_output =
+        rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            raw_sum, params.output_multiplier, params.output_shift, vl);
+    raw_output =
+        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
+    raw_output = __riscv_vmax_vx_i32m4(
+        raw_output, params.quantized_activation_min, vl);
+    raw_output = __riscv_vmin_vx_i32m4(
+        raw_output, params.quantized_activation_max, vl);
+
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
+                        narrowed_i8, vl);
+    i += vl;
   }
 #endif  // NEON
 
