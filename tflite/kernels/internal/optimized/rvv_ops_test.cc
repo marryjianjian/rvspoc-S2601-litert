@@ -21,10 +21,12 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/integer_ops/add.h"
+#include "tflite/kernels/internal/optimized/integer_ops/sub.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/reference/add.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
+#include "tflite/kernels/internal/reference/sub.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {
@@ -237,6 +239,28 @@ TEST(RvvOpsTest, BiasAndClampMatchesScalarReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, FloatSubMatchesReferenceAcrossVectorBoundaries) {
+  ArithmeticParams params;
+  params.float_activation_min = -3.25f;
+  params.float_activation_max = 2.0f;
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input1 = MakeInput(size, 1.375f);
+    const std::vector<float> input2 = MakeInput(size, -0.625f);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::SubWithActivation<float>(
+        params, shape, input1.data(), shape, input2.data(), shape,
+        actual.data());
+    reference_ops::SubWithActivation(params, shape, input1.data(), shape,
+                                     input2.data(), shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
 TEST(RvvOpsTest, Int8AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
   const ArithmeticParams params = MakeInt8Params();
 
@@ -275,6 +299,24 @@ TEST(RvvOpsTest, Int8AddScalarBroadcastMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, Int8SubElementwiseMatchesReferenceAcrossVectorBoundaries) {
+  const ArithmeticParams params = MakeInt8Params();
+
+  for (int size : Int8M1VectorLengths()) {
+    const std::vector<int8_t> input1 = MakeInt8Input(size, 41);
+    const std::vector<int8_t> input2 = MakeInt8Input(size, 113);
+    std::vector<int8_t> actual(size);
+    std::vector<int8_t> expected(size);
+
+    optimized_integer_ops::SubElementwiseInt8(
+        size, params, input1.data(), input2.data(), actual.data());
+    reference_ops::SubElementwise(size, params, input1.data(), input2.data(),
+                                  expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
 TEST(RvvOpsTest, Uint8AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
   const ArithmeticParams params = MakeUint8Params();
 
@@ -287,6 +329,24 @@ TEST(RvvOpsTest, Uint8AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
     optimized_ops::AddElementwise(size, params, input1.data(), input2.data(),
                                   actual.data());
     reference_ops::AddElementwise(size, params, input1.data(), input2.data(),
+                                  expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, Uint8SubElementwiseMatchesReferenceAcrossVectorBoundaries) {
+  const ArithmeticParams params = MakeUint8Params();
+
+  for (int size : Int8M1VectorLengths()) {
+    const std::vector<uint8_t> input1 = MakeUint8Input(size, 47);
+    const std::vector<uint8_t> input2 = MakeUint8Input(size, 139);
+    std::vector<uint8_t> actual(size);
+    std::vector<uint8_t> expected(size);
+
+    optimized_ops::SubElementwise(size, params, input1.data(), input2.data(),
+                                  actual.data());
+    reference_ops::SubElementwise(size, params, input1.data(), input2.data(),
                                   expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
@@ -323,6 +383,24 @@ TEST(RvvOpsTest, Int16AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
     optimized_integer_ops::AddElementwiseInt16(
         size, params, input1.data(), input2.data(), actual.data());
     reference_ops::AddElementwise(size, params, input1.data(), input2.data(),
+                                  expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, Int16SubElementwiseMatchesReferenceAcrossVectorBoundaries) {
+  const ArithmeticParams params = MakeInt16Params();
+
+  for (int size : Int16M2VectorLengths()) {
+    const std::vector<int16_t> input1 = MakeInt16Input(size, 301);
+    const std::vector<int16_t> input2 = MakeInt16Input(size, 2701);
+    std::vector<int16_t> actual(size);
+    std::vector<int16_t> expected(size);
+
+    optimized_integer_ops::SubElementwiseInt16(
+        size, params, input1.data(), input2.data(), actual.data());
+    reference_ops::SubElementwise(size, params, input1.data(), input2.data(),
                                   expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;

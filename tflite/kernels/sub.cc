@@ -407,8 +407,10 @@ void EvalQuantized(TfLiteContext* context, TfLiteNode* node,
   if (output->type == kTfLiteInt8) {
     if (need_broadcast) {
       TF_LITE_SUB(reference_ops, BroadcastQuantSubSlow, int8_t);
-    } else {
+    } else if (kernel_type == kReference) {
       TF_LITE_SUB(reference_ops, Sub, int8_t);
+    } else {
+      TF_LITE_SUB(optimized_integer_ops, Sub, int8_t);
     }
   } else if (!data->pot_scale_int16) {
     if (kernel_type == kReference) {
@@ -427,8 +429,10 @@ void EvalQuantized(TfLiteContext* context, TfLiteNode* node,
   } else if (output->type == kTfLiteUInt8) {
     if (need_broadcast) {
       TF_LITE_SUB(reference_ops, BroadcastQuantSubSlow, uint8_t);
-    } else {
+    } else if (kernel_type == kReference) {
       TF_LITE_SUB(reference_ops, Sub, uint8_t);
+    } else {
+      TF_LITE_SUB(optimized_ops, Sub, uint8_t);
     }
   } else {
     if (kernel_type == kReference) {
