@@ -21,11 +21,14 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/integer_ops/add.h"
+#include "tflite/kernels/internal/optimized/integer_ops/mul.h"
 #include "tflite/kernels/internal/optimized/integer_ops/sub.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/reference/add.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
+#include "tflite/kernels/internal/reference/integer_ops/mul.h"
+#include "tflite/kernels/internal/reference/mul.h"
 #include "tflite/kernels/internal/reference/sub.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -61,6 +64,14 @@ std::vector<uint8_t> MakeUint8Input(int size, int offset) {
   std::vector<uint8_t> values(size);
   for (int i = 0; i < size; ++i) {
     values[i] = static_cast<uint8_t>((i * 53 + offset) % 256);
+  }
+  return values;
+}
+
+std::vector<int32_t> MakeInt32Input(int size, int offset) {
+  std::vector<int32_t> values(size);
+  for (int i = 0; i < size; ++i) {
+    values[i] = ((i * 7919 + offset) % 2001) - 1000;
   }
   return values;
 }
@@ -104,6 +115,30 @@ ArithmeticParams MakeUint8Params() {
   params.output_offset = 121;
   params.quantized_activation_min = 11;
   params.quantized_activation_max = 233;
+  return params;
+}
+
+ArithmeticParams MakeInt8MulParams(int output_shift) {
+  ArithmeticParams params;
+  params.input1_offset = 5;
+  params.input2_offset = -7;
+  params.output_multiplier = 1073741824;
+  params.output_shift = output_shift;
+  params.output_offset = -3;
+  params.quantized_activation_min = -100;
+  params.quantized_activation_max = 101;
+  return params;
+}
+
+ArithmeticParams MakeUint8MulParams(int output_shift) {
+  ArithmeticParams params;
+  params.input1_offset = -128;
+  params.input2_offset = -123;
+  params.output_multiplier = 1073741824;
+  params.output_shift = output_shift;
+  params.output_offset = 127;
+  params.quantized_activation_min = 7;
+  params.quantized_activation_max = 241;
   return params;
 }
 
@@ -261,6 +296,71 @@ TEST(RvvOpsTest, FloatSubMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, FloatMulElementwiseMatchesReferenceAcrossVectorBoundaries) {
+  ArithmeticParams params;
+  params.float_activation_min = -3.0f;
+  params.float_activation_max = 4.0f;
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input1 = MakeInput(size, -0.75f);
+    const std::vector<float> input2 = MakeInput(size, 0.625f);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::Mul(params, shape, input1.data(), shape, input2.data(),
+                       shape, actual.data());
+    reference_ops::Mul(params, shape, input1.data(), shape, input2.data(),
+                       shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, FloatMulSimpleBroadcastMatchesReferenceAcrossVectorBoundaries) {
+  ArithmeticParams params;
+  params.float_activation_min = -2.75f;
+  params.float_activation_max = 3.25f;
+  constexpr float kBroadcastValue = -1.375f;
+
+  for (int size : Float32M4VectorLengths()) {
+    const std::vector<float> input = MakeInput(size, 0.375f);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::MulSimpleBroadcast(size, params, kBroadcastValue,
+                                      input.data(), actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = Clamp(kBroadcastValue * input[i],
+                          params.float_activation_min,
+                          params.float_activation_max);
+    }
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, Int32MulElementwiseMatchesReferenceAcrossVectorBoundaries) {
+  ArithmeticParams params;
+  params.quantized_activation_min = -250000;
+  params.quantized_activation_max = 225000;
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<int32_t> input1 = MakeInt32Input(size, 101);
+    const std::vector<int32_t> input2 = MakeInt32Input(size, 1703);
+    std::vector<int32_t> actual(size);
+    std::vector<int32_t> expected(size);
+
+    optimized_ops::Mul(params, shape, input1.data(), shape, input2.data(),
+                       shape, actual.data());
+    reference_ops::Mul(params, shape, input1.data(), shape, input2.data(),
+                       shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
 TEST(RvvOpsTest, Int8AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
   const ArithmeticParams params = MakeInt8Params();
 
@@ -317,6 +417,49 @@ TEST(RvvOpsTest, Int8SubElementwiseMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, Int8MulElementwiseMatchesReferenceAcrossVectorBoundaries) {
+  for (const ArithmeticParams params :
+       {MakeInt8MulParams(-2), MakeInt8MulParams(1)}) {
+    for (int size : Int8M1VectorLengths()) {
+      const std::vector<int8_t> input1 = MakeInt8Input(size, 59);
+      const std::vector<int8_t> input2 = MakeInt8Input(size, 127);
+      std::vector<int8_t> actual(size);
+      std::vector<int8_t> expected(size);
+
+      optimized_integer_ops::MulElementwise(
+          size, params, input1.data(), input2.data(), actual.data());
+      reference_integer_ops::MulElementwise(
+          size, params, input1.data(), input2.data(), expected.data());
+
+      EXPECT_THAT(actual, ElementsAreArray(expected))
+          << "size=" << size << " output_shift=" << params.output_shift;
+    }
+  }
+}
+
+TEST(RvvOpsTest, Int8MulSimpleBroadcastMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int8_t kBroadcastValue = -29;
+
+  for (const ArithmeticParams params :
+       {MakeInt8MulParams(-2), MakeInt8MulParams(1)}) {
+    for (int size : Int8M1VectorLengths()) {
+      const std::vector<int8_t> input = MakeInt8Input(size, 211);
+      const std::vector<int8_t> broadcast_values(size, kBroadcastValue);
+      std::vector<int8_t> actual(size);
+      std::vector<int8_t> expected(size);
+
+      optimized_integer_ops::MulSimpleBroadcast(
+          size, params, kBroadcastValue, input.data(), actual.data());
+      reference_integer_ops::MulElementwise(
+          size, params, broadcast_values.data(), input.data(),
+          expected.data());
+
+      EXPECT_THAT(actual, ElementsAreArray(expected))
+          << "size=" << size << " output_shift=" << params.output_shift;
+    }
+  }
+}
+
 TEST(RvvOpsTest, Uint8AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
   const ArithmeticParams params = MakeUint8Params();
 
@@ -353,6 +496,26 @@ TEST(RvvOpsTest, Uint8SubElementwiseMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, Uint8MulElementwiseMatchesReferenceAcrossVectorBoundaries) {
+  for (const ArithmeticParams params :
+       {MakeUint8MulParams(-2), MakeUint8MulParams(1)}) {
+    for (int size : Int8M1VectorLengths()) {
+      const std::vector<uint8_t> input1 = MakeUint8Input(size, 31);
+      const std::vector<uint8_t> input2 = MakeUint8Input(size, 149);
+      std::vector<uint8_t> actual(size);
+      std::vector<uint8_t> expected(size);
+
+      optimized_ops::MulElementwise(size, params, input1.data(),
+                                    input2.data(), actual.data());
+      reference_ops::MulElementwise(size, params, input1.data(),
+                                    input2.data(), expected.data());
+
+      EXPECT_THAT(actual, ElementsAreArray(expected))
+          << "size=" << size << " output_shift=" << params.output_shift;
+    }
+  }
+}
+
 TEST(RvvOpsTest, Uint8AddScalarBroadcastMatchesReferenceAcrossVectorBoundaries) {
   const ArithmeticParams params = MakeUint8Params();
   constexpr uint8_t kBroadcastValue = 173;
@@ -368,6 +531,29 @@ TEST(RvvOpsTest, Uint8AddScalarBroadcastMatchesReferenceAcrossVectorBoundaries) 
                                       input.data(), expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest,
+     Uint8MulSimpleBroadcastMatchesReferenceAcrossVectorBoundaries) {
+  constexpr uint8_t kBroadcastValue = 173;
+
+  for (const ArithmeticParams params :
+       {MakeUint8MulParams(-2), MakeUint8MulParams(1)}) {
+    for (int size : Int8M1VectorLengths()) {
+      const std::vector<uint8_t> input = MakeUint8Input(size, 67);
+      const std::vector<uint8_t> broadcast_values(size, kBroadcastValue);
+      std::vector<uint8_t> actual(size);
+      std::vector<uint8_t> expected(size);
+
+      optimized_ops::MulSimpleBroadcast(size, params, kBroadcastValue,
+                                        input.data(), actual.data());
+      reference_ops::MulElementwise(size, params, broadcast_values.data(),
+                                    input.data(), expected.data());
+
+      EXPECT_THAT(actual, ElementsAreArray(expected))
+          << "size=" << size << " output_shift=" << params.output_shift;
+    }
   }
 }
 

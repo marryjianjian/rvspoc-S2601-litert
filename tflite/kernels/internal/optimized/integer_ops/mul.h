@@ -24,6 +24,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/cpu_check.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
+#include "tflite/kernels/internal/optimized/rvv_ops.h"
 #include "tflite/kernels/internal/reference/integer_ops/mul.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -120,7 +121,35 @@ inline void MulElementwise(int size, const ArithmeticParams& params,
                                   vminq_s8(output_activation_max_vector, p));
     vst1q_s8(output_data + i, clamped);
   }
-#endif  // NEON
+#elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vint8m1_t input1_i8 =
+        __riscv_vle8_v_i8m1(input1_data + i, vl);
+    const vint8m1_t input2_i8 =
+        __riscv_vle8_v_i8m1(input2_data + i, vl);
+    const vint16m2_t input1_i16 = __riscv_vsext_vf2_i16m2(input1_i8, vl);
+    const vint16m2_t input2_i16 = __riscv_vsext_vf2_i16m2(input2_i8, vl);
+    const vint32m4_t input1 = __riscv_vadd_vx_i32m4(
+        __riscv_vsext_vf2_i32m4(input1_i16, vl), params.input1_offset, vl);
+    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
+        __riscv_vsext_vf2_i32m4(input2_i16, vl), params.input2_offset, vl);
+    const vint32m4_t product = __riscv_vmul_vv_i32m4(input1, input2, vl);
+    vint32m4_t raw_output = rvv_ops::MultiplyByQuantizedMultiplier(
+        product, params.output_multiplier, params.output_shift, vl);
+    raw_output =
+        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
+    raw_output = __riscv_vmax_vx_i32m4(
+        raw_output, params.quantized_activation_min, vl);
+    raw_output = __riscv_vmin_vx_i32m4(
+        raw_output, params.quantized_activation_max, vl);
+
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(output_data + i, narrowed_i8, vl);
+    i += vl;
+  }
+#endif  // NEON / USE_RVV
 
   for (; i < size; ++i) {
     const int32 input1_val = params.input1_offset + input1_data[i];
@@ -213,7 +242,31 @@ inline void MulSimpleBroadcast(int size, const ArithmeticParams& params,
                                   vminq_s8(output_activation_max_vector, p));
     vst1q_s8(output_data + i, clamped);
   }
-#endif  // NEON
+#elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vint8m1_t input2_i8 =
+        __riscv_vle8_v_i8m1(input2_data + i, vl);
+    const vint16m2_t input2_i16 = __riscv_vsext_vf2_i16m2(input2_i8, vl);
+    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
+        __riscv_vsext_vf2_i32m4(input2_i16, vl), params.input2_offset, vl);
+    const vint32m4_t product =
+        __riscv_vmul_vx_i32m4(input2, input1_val, vl);
+    vint32m4_t raw_output = rvv_ops::MultiplyByQuantizedMultiplier(
+        product, params.output_multiplier, params.output_shift, vl);
+    raw_output =
+        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
+    raw_output = __riscv_vmax_vx_i32m4(
+        raw_output, params.quantized_activation_min, vl);
+    raw_output = __riscv_vmin_vx_i32m4(
+        raw_output, params.quantized_activation_max, vl);
+
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(output_data + i, narrowed_i8, vl);
+    i += vl;
+  }
+#endif  // NEON / USE_RVV
 
   for (; i < size; ++i) {
     const int32 input2_val = params.input2_offset + input2_data[i];

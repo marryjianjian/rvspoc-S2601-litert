@@ -15,6 +15,7 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_RVV_OPS_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_RVV_OPS_H_
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 
@@ -88,9 +89,20 @@ MultiplyByQuantizedMultiplierSmallerThanOneExp(vint32m4_t x, int32_t multiplier,
       SaturatingRoundingDoublingHighMul(x, multiplier, vl), -shift, vl);
 }
 
-#endif // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+inline vint32m4_t MultiplyByQuantizedMultiplier(vint32m4_t x,
+                                                int32_t multiplier, int shift,
+                                                size_t vl) {
+  const int left_shift = std::max(shift, 0);
+  const int right_shift = std::max(-shift, 0);
+  x = __riscv_vsll_vx_i32m4(x, left_shift, vl);
+  return RoundingDivideByPOT(SaturatingRoundingDoublingHighMul(x, multiplier,
+                                                               vl),
+                             right_shift, vl);
+}
 
-} // namespace rvv_ops
-} // namespace tflite
+#endif  // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
 
-#endif // TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_RVV_OPS_H_
+}  // namespace rvv_ops
+}  // namespace tflite
+
+#endif  // TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_RVV_OPS_H_

@@ -2060,7 +2060,18 @@ inline void MulElementwise(int size, const ArithmeticParams& params,
 
     vst1q_f32(output_data + i, x);
   }
-#endif  // NEON
+#elif defined(USE_RVV)
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t a = __riscv_vle32_v_f32m4(input1_data + i, vl);
+    vfloat32m4_t b = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t x = __riscv_vfmul_vv_f32m4(a, b, vl);
+    x = __riscv_vfmax_vf_f32m4(x, output_activation_min, vl);
+    x = __riscv_vfmin_vf_f32m4(x, output_activation_max, vl);
+    __riscv_vse32_v_f32m4(output_data + i, x, vl);
+    i += vl;
+  }
+#endif  // NEON / USE_RVV
 
   for (; i < size; i++) {
     auto x = input1_data[i] * input2_data[i];
@@ -2117,7 +2128,18 @@ inline void MulElementwise(int32_t n, const ArithmeticParams& params,
     vst1q_s32(out + i + 8, min_reg3);
     vst1q_s32(out + i + 12, min_reg4);
   }
-#endif
+#elif defined(USE_RVV)
+  for (; i < n;) {
+    const size_t vl = __riscv_vsetvl_e32m4(n - i);
+    const vint32m4_t lhs_reg = __riscv_vle32_v_i32m4(lhs + i, vl);
+    const vint32m4_t rhs_reg = __riscv_vle32_v_i32m4(rhs + i, vl);
+    vint32m4_t result = __riscv_vmul_vv_i32m4(lhs_reg, rhs_reg, vl);
+    result = __riscv_vmax_vx_i32m4(result, activation_min_val, vl);
+    result = __riscv_vmin_vx_i32m4(result, activation_max_val, vl);
+    __riscv_vse32_v_i32m4(out + i, result, vl);
+    i += vl;
+  }
+#endif  // USE_NEON / USE_RVV
 
   // This will handle leftovers when n is not aligned to 4 elements.
   for (; i < n; ++i) {
@@ -2287,7 +2309,40 @@ inline void MulElementwise(int size, const ArithmeticParams& params,
                 vmin_u8(output_activation_max_vector, vqmovun_s16(p)));
     vst1_u8(output_data + i, clamped);
   }
-#endif  // NEON
+#elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vuint8m1_t input1_u8 =
+        __riscv_vle8_v_u8m1(input1_data + i, vl);
+    const vuint8m1_t input2_u8 =
+        __riscv_vle8_v_u8m1(input2_data + i, vl);
+    const vuint16m2_t input1_u16 = __riscv_vzext_vf2_u16m2(input1_u8, vl);
+    const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
+    const vint32m4_t input1 = __riscv_vadd_vx_i32m4(
+        __riscv_vreinterpret_v_u32m4_i32m4(
+            __riscv_vzext_vf2_u32m4(input1_u16, vl)),
+        params.input1_offset, vl);
+    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
+        __riscv_vreinterpret_v_u32m4_i32m4(
+            __riscv_vzext_vf2_u32m4(input2_u16, vl)),
+        params.input2_offset, vl);
+    const vint32m4_t product = __riscv_vmul_vv_i32m4(input1, input2, vl);
+    vint32m4_t raw_output = rvv_ops::MultiplyByQuantizedMultiplier(
+        product, params.output_multiplier, params.output_shift, vl);
+    raw_output =
+        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
+    raw_output = __riscv_vmax_vx_i32m4(
+        raw_output, params.quantized_activation_min, vl);
+    raw_output = __riscv_vmin_vx_i32m4(
+        raw_output, params.quantized_activation_max, vl);
+
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
+                        narrowed_i8, vl);
+    i += vl;
+  }
+#endif  // NEON / USE_RVV
 
   for (; i < size; ++i) {
     const int32_t input1_val = params.input1_offset + input1_data[i];
@@ -2358,7 +2413,34 @@ inline void MulSimpleBroadcast(int size, const ArithmeticParams& params,
                 vmin_u8(output_activation_max_vector, vqmovun_s16(p)));
     vst1_u8(output_data + i, clamped);
   }
-#endif  // NEON
+#elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vuint8m1_t input2_u8 =
+        __riscv_vle8_v_u8m1(input2_data + i, vl);
+    const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
+    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
+        __riscv_vreinterpret_v_u32m4_i32m4(
+            __riscv_vzext_vf2_u32m4(input2_u16, vl)),
+        params.input2_offset, vl);
+    const vint32m4_t product =
+        __riscv_vmul_vx_i32m4(input2, input1_val, vl);
+    vint32m4_t raw_output = rvv_ops::MultiplyByQuantizedMultiplier(
+        product, params.output_multiplier, params.output_shift, vl);
+    raw_output =
+        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
+    raw_output = __riscv_vmax_vx_i32m4(
+        raw_output, params.quantized_activation_min, vl);
+    raw_output = __riscv_vmin_vx_i32m4(
+        raw_output, params.quantized_activation_max, vl);
+
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
+                        narrowed_i8, vl);
+    i += vl;
+  }
+#endif  // NEON / USE_RVV
 
   for (; i < size; ++i) {
     const int32_t input2_val = params.input2_offset + input2_data[i];
@@ -2398,7 +2480,17 @@ inline void MulSimpleBroadcast(int size, const ArithmeticParams& params,
                   vminq_f32(output_activation_max_vector, output));
     vst1q_f32(output_data + i, clamped);
   }
-#endif  // NEON
+#elif defined(USE_RVV)
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t input = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t output = __riscv_vfmul_vf_f32m4(input, broadcast_value, vl);
+    output = __riscv_vfmax_vf_f32m4(output, params.float_activation_min, vl);
+    output = __riscv_vfmin_vf_f32m4(output, params.float_activation_max, vl);
+    __riscv_vse32_v_f32m4(output_data + i, output, vl);
+    i += vl;
+  }
+#endif  // NEON / USE_RVV
 
   for (; i < size; ++i) {
     float x = broadcast_value * input2_data[i];
