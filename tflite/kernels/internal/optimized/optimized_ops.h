@@ -2555,6 +2555,86 @@ inline void BroadcastMulFivefold(const ArithmeticParams& params,
                        output_shape, output_data);
 }
 
+inline void DivElementwise(int size, const ArithmeticParams& params,
+                           const float* input1_data, const float* input2_data,
+                           float* output_data) {
+  float output_activation_min;
+  float output_activation_max;
+  GetActivationParams(params, &output_activation_min, &output_activation_max);
+
+  int i = 0;
+#if defined(USE_RVV)
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vfloat32m4_t input1 =
+        __riscv_vle32_v_f32m4(input1_data + i, vl);
+    const vfloat32m4_t input2 =
+        __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t output = __riscv_vfdiv_vv_f32m4(input1, input2, vl);
+    output = __riscv_vfmax_vf_f32m4(output, output_activation_min, vl);
+    output = __riscv_vfmin_vf_f32m4(output, output_activation_max, vl);
+    __riscv_vse32_v_f32m4(output_data + i, output, vl);
+    i += vl;
+  }
+#endif  // USE_RVV
+
+  for (; i < size; ++i) {
+    output_data[i] = ActivationFunctionWithMinMax(
+        input1_data[i] / input2_data[i], output_activation_min,
+        output_activation_max);
+  }
+}
+
+inline void Div(const ArithmeticParams& params,
+                const RuntimeShape& input1_shape, const float* input1_data,
+                const RuntimeShape& input2_shape, const float* input2_data,
+                const RuntimeShape& output_shape, float* output_data) {
+  ruy::profiler::ScopeLabel label("Div_optimized/float");
+  const int flat_size =
+      MatchingElementsSize(input1_shape, input2_shape, output_shape);
+  DivElementwise(flat_size, params, input1_data, input2_data, output_data);
+}
+
+inline void DivElementwise(int size, const ArithmeticParams& params,
+                           const int32_t* input1_data,
+                           const int32_t* input2_data, int32_t* output_data) {
+  int32_t output_activation_min;
+  int32_t output_activation_max;
+  GetActivationParams(params, &output_activation_min, &output_activation_max);
+
+  int i = 0;
+#if defined(USE_RVV)
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vint32m4_t input1 =
+        __riscv_vle32_v_i32m4(input1_data + i, vl);
+    const vint32m4_t input2 =
+        __riscv_vle32_v_i32m4(input2_data + i, vl);
+    vint32m4_t output = __riscv_vdiv_vv_i32m4(input1, input2, vl);
+    output = __riscv_vmax_vx_i32m4(output, output_activation_min, vl);
+    output = __riscv_vmin_vx_i32m4(output, output_activation_max, vl);
+    __riscv_vse32_v_i32m4(output_data + i, output, vl);
+    i += vl;
+  }
+#endif  // USE_RVV
+
+  for (; i < size; ++i) {
+    output_data[i] = ActivationFunctionWithMinMax(
+        input1_data[i] / input2_data[i], output_activation_min,
+        output_activation_max);
+  }
+}
+
+inline void Div(const ArithmeticParams& params,
+                const RuntimeShape& input1_shape, const int32_t* input1_data,
+                const RuntimeShape& input2_shape, const int32_t* input2_data,
+                const RuntimeShape& output_shape, int32_t* output_data) {
+  ruy::profiler::ScopeLabel label("Div_optimized/int32");
+  const int flat_size =
+      MatchingElementsSize(input1_shape, input2_shape, output_shape);
+  DivElementwise(flat_size, params, input1_data, input2_data, output_data);
+}
+
 // TODO(jiawen): We can implement BroadcastDiv on buffers of arbitrary
 // dimensionality if the runtime code does a single loop over one dimension
 // that handles broadcasting as the base case. The code generator would then

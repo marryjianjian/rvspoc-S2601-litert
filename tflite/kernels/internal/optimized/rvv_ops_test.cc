@@ -26,6 +26,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/reference/add.h"
+#include "tflite/kernels/internal/reference/div.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
 #include "tflite/kernels/internal/reference/integer_ops/mul.h"
 #include "tflite/kernels/internal/reference/mul.h"
@@ -72,6 +73,18 @@ std::vector<int32_t> MakeInt32Input(int size, int offset) {
   std::vector<int32_t> values(size);
   for (int i = 0; i < size; ++i) {
     values[i] = ((i * 7919 + offset) % 2001) - 1000;
+  }
+  return values;
+}
+
+std::vector<int32_t> MakeNonZeroInt32Input(int size, int offset) {
+  std::vector<int32_t> values(size);
+  for (int i = 0; i < size; ++i) {
+    int32_t value = ((i * 1543 + offset) % 199) - 99;
+    if (value == 0) {
+      value = 17;
+    }
+    values[i] = value;
   }
   return values;
 }
@@ -296,6 +309,32 @@ TEST(RvvOpsTest, FloatSubMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, FloatDivElementwiseMatchesReferenceAcrossVectorBoundaries) {
+  ArithmeticParams params;
+  params.float_activation_min = -4.0f;
+  params.float_activation_max = 5.0f;
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input1 = MakeInput(size, 1.25f);
+    std::vector<float> input2 = MakeInput(size, 2.5f);
+    for (float& value : input2) {
+      if (value == 0.0f) {
+        value = 0.5f;
+      }
+    }
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::Div(params, shape, input1.data(), shape, input2.data(),
+                       shape, actual.data());
+    reference_ops::Div(params, shape, input1.data(), shape, input2.data(),
+                       shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
 TEST(RvvOpsTest, FloatMulElementwiseMatchesReferenceAcrossVectorBoundaries) {
   ArithmeticParams params;
   params.float_activation_min = -3.0f;
@@ -355,6 +394,27 @@ TEST(RvvOpsTest, Int32MulElementwiseMatchesReferenceAcrossVectorBoundaries) {
     optimized_ops::Mul(params, shape, input1.data(), shape, input2.data(),
                        shape, actual.data());
     reference_ops::Mul(params, shape, input1.data(), shape, input2.data(),
+                       shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, Int32DivElementwiseMatchesReferenceAcrossVectorBoundaries) {
+  ArithmeticParams params;
+  params.quantized_activation_min = -250;
+  params.quantized_activation_max = 225;
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<int32_t> input1 = MakeInt32Input(size, 1901);
+    const std::vector<int32_t> input2 = MakeNonZeroInt32Input(size, 73);
+    std::vector<int32_t> actual(size);
+    std::vector<int32_t> expected(size);
+
+    optimized_ops::Div(params, shape, input1.data(), shape, input2.data(),
+                       shape, actual.data());
+    reference_ops::Div(params, shape, input1.data(), shape, input2.data(),
                        shape, expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
