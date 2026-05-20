@@ -4043,6 +4043,33 @@ inline void SoftmaxImpl(const SoftmaxParams& params,
   MatchingFlatSize(input_shape, output_shape);
 
   const int logit_size = input_shape.Dims(input_shape.DimensionsCount() - 1);
+#if defined(USE_RVV)
+  for (int batch = start_batch; batch < end_batch; ++batch) {
+    const float* row_input = input_data + logit_size * batch;
+    float* row_output = output_data + logit_size * batch;
+
+    float max_value = std::numeric_limits<float>::lowest();
+    for (int i = 0; i < logit_size; ++i) {
+      max_value = std::max(max_value, row_input[i]);
+    }
+
+    float sum = 0.0f;
+    for (int i = 0; i < logit_size; ++i) {
+      const float exp_value =
+          std::exp((row_input[i] - max_value) * params.beta);
+      row_output[i] = exp_value;
+      sum += exp_value;
+    }
+
+    for (int i = 0; i < logit_size;) {
+      const size_t vl = __riscv_vsetvl_e32m4(logit_size - i);
+      vfloat32m4_t output = __riscv_vle32_v_f32m4(row_output + i, vl);
+      output = __riscv_vfdiv_vf_f32m4(output, sum, vl);
+      __riscv_vse32_v_f32m4(row_output + i, output, vl);
+      i += vl;
+    }
+  }
+#else
   const MatrixMap<const float> in_mat(input_data + logit_size * start_batch,
                                       logit_size, end_batch - start_batch);
   MatrixMap<float> out_mat(output_data + logit_size * start_batch, logit_size,
@@ -4057,6 +4084,7 @@ inline void SoftmaxImpl(const SoftmaxParams& params,
   Eigen::Array<float, 1, Eigen::Dynamic> scale =
       out_mat.array().colwise().sum().inverse();
   out_mat.array().rowwise() *= scale;
+#endif  // USE_RVV
 }
 
 struct SoftmaxWorkerTask : cpu_backend_threadpool::Task {

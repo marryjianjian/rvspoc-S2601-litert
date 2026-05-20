@@ -410,6 +410,29 @@ TEST(RvvOpsTest, FloatHardSwishMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, FloatSoftmaxMatchesReferenceAcrossVectorBoundaries) {
+  SoftmaxParams params;
+  params.beta = 0.75f;
+  constexpr int kBatchSize = 3;
+
+  for (int depth : Float32M4VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape shape({kBatchSize, depth});
+    const std::vector<float> input = MakeInput(kBatchSize * depth, -0.375f);
+    std::vector<float> actual(kBatchSize * depth);
+    std::vector<float> expected(kBatchSize * depth);
+
+    optimized_ops::Softmax(params, shape, input.data(), shape, actual.data());
+    reference_ops::Softmax(params, shape, input.data(), shape,
+                           expected.data());
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "depth=" << depth;
+  }
+}
+
 TEST(RvvOpsTest, FloatDivElementwiseMatchesReferenceAcrossVectorBoundaries) {
   ArithmeticParams params;
   params.float_activation_min = -4.0f;
