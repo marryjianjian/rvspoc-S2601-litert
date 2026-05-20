@@ -30,6 +30,7 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
 #include "tflite/kernels/internal/reference/integer_ops/mul.h"
 #include "tflite/kernels/internal/reference/mul.h"
+#include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/reference/sub.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -172,6 +173,39 @@ ArithmeticParams MakeInt16Params() {
   return params;
 }
 
+ReluParams MakeInt8ReluParams() {
+  ReluParams params;
+  params.input_offset = -3;
+  params.output_offset = -3;
+  params.output_multiplier = 1073741824;
+  params.output_shift = 1;
+  params.quantized_activation_min = -3;
+  params.quantized_activation_max = 127;
+  return params;
+}
+
+ReluParams MakeUint8ReluParams() {
+  ReluParams params;
+  params.input_offset = 128;
+  params.output_offset = 128;
+  params.output_multiplier = 1073741824;
+  params.output_shift = 1;
+  params.quantized_activation_min = 128;
+  params.quantized_activation_max = 255;
+  return params;
+}
+
+ReluParams MakeInt16ReluParams() {
+  ReluParams params;
+  params.input_offset = 0;
+  params.output_offset = 0;
+  params.output_multiplier = 1073741824;
+  params.output_shift = 1;
+  params.quantized_activation_min = 0;
+  params.quantized_activation_max = 32767;
+  return params;
+}
+
 // Reuse these lengths for future RVV tests so every vectorized kernel gets
 // coverage around its real strip-mining boundary.
 std::vector<int> VectorLengthsAroundVlmax(int vlmax) {
@@ -304,6 +338,20 @@ TEST(RvvOpsTest, FloatSubMatchesReferenceAcrossVectorBoundaries) {
         actual.data());
     reference_ops::SubWithActivation(params, shape, input1.data(), shape,
                                      input2.data(), shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, FloatReluMatchesReferenceAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input = MakeInput(size, -0.125f);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::Relu(shape, input.data(), shape, actual.data());
+    reference_ops::Relu(shape, input.data(), shape, expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
   }
@@ -520,6 +568,22 @@ TEST(RvvOpsTest, Int8MulSimpleBroadcastMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, Int8ReluXMatchesReferenceAcrossVectorBoundaries) {
+  const ReluParams params = MakeInt8ReluParams();
+
+  for (int size : Int8M1VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<int8_t> input = MakeInt8Input(size, 97);
+    std::vector<int8_t> actual(size);
+    std::vector<int8_t> expected(size);
+
+    optimized_ops::ReluX(params, shape, input.data(), shape, actual.data());
+    reference_ops::ReluX(params, shape, input.data(), shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
 TEST(RvvOpsTest, Uint8AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
   const ArithmeticParams params = MakeUint8Params();
 
@@ -617,6 +681,22 @@ TEST(RvvOpsTest,
   }
 }
 
+TEST(RvvOpsTest, Uint8ReluXMatchesReferenceAcrossVectorBoundaries) {
+  const ReluParams params = MakeUint8ReluParams();
+
+  for (int size : Int8M1VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<uint8_t> input = MakeUint8Input(size, 197);
+    std::vector<uint8_t> actual(size);
+    std::vector<uint8_t> expected(size);
+
+    optimized_ops::ReluX(params, shape, input.data(), shape, actual.data());
+    reference_ops::ReluX(params, shape, input.data(), shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
 TEST(RvvOpsTest, Int16AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
   const ArithmeticParams params = MakeInt16Params();
 
@@ -630,6 +710,22 @@ TEST(RvvOpsTest, Int16AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
         size, params, input1.data(), input2.data(), actual.data());
     reference_ops::AddElementwise(size, params, input1.data(), input2.data(),
                                   expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, Int16ReluXMatchesReferenceAcrossVectorBoundaries) {
+  const ReluParams params = MakeInt16ReluParams();
+
+  for (int size : Int16M2VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<int16_t> input = MakeInt16Input(size, 1103);
+    std::vector<int16_t> actual(size);
+    std::vector<int16_t> expected(size);
+
+    optimized_ops::ReluX(params, shape, input.data(), shape, actual.data());
+    reference_ops::ReluX(params, shape, input.data(), shape, expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
   }

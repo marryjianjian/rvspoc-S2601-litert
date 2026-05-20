@@ -107,7 +107,6 @@ using reference_ops::RankOneSelect;
 using reference_ops::Relu0To1;  // NOLINT
 using reference_ops::Relu1;
 using reference_ops::Relu6;
-using reference_ops::ReluX;
 using reference_ops::Round;
 using reference_ops::Select;
 using reference_ops::SpaceToBatchND;
@@ -1404,9 +1403,157 @@ inline void Relu(const RuntimeShape& input_shape, const float* input_data,
                  const RuntimeShape& output_shape, float* output_data) {
   ruy::profiler::ScopeLabel label("Relu (not fused)");
 
-  const auto input = MapAsVector(input_data, input_shape);
-  auto output = MapAsVector(output_data, output_shape);
-  output = input.cwiseMax(0.0f);
+  const int flat_size = MatchingFlatSize(input_shape, output_shape);
+  int i = 0;
+#if defined(USE_RVV)
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(flat_size - i);
+    vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
+    input = __riscv_vfmax_vf_f32m4(input, 0.0f, vl);
+    __riscv_vse32_v_f32m4(output_data + i, input, vl);
+    i += vl;
+  }
+#endif  // USE_RVV
+
+  if (i == flat_size) {
+    return;
+  }
+
+  for (; i < flat_size; ++i) {
+    output_data[i] = std::max(input_data[i], 0.0f);
+  }
+}
+
+template <typename T>
+inline void ReluX(const tflite::ReluParams& params,
+                  const RuntimeShape& input_shape, const T* input_data,
+                  const RuntimeShape& output_shape, T* output_data) {
+  ruy::profiler::ScopeLabel label("Quantized ReluX (not fused)");
+  const int flat_size = MatchingFlatSize(input_shape, output_shape);
+  int i = 0;
+
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  if constexpr (std::is_same<T, int8_t>::value) {
+    for (; i < flat_size;) {
+      const size_t vl = __riscv_vsetvl_e8m1(flat_size - i);
+      const vint8m1_t input_i8 = __riscv_vle8_v_i8m1(input_data + i, vl);
+      const vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
+      vint32m4_t output = __riscv_vsub_vx_i32m4(
+          __riscv_vsext_vf2_i32m4(input_i16, vl), params.input_offset, vl);
+      output = rvv_ops::MultiplyByQuantizedMultiplier(
+          output, params.output_multiplier, params.output_shift, vl);
+      output = __riscv_vadd_vx_i32m4(output, params.output_offset, vl);
+      output =
+          __riscv_vmax_vx_i32m4(output, params.quantized_activation_min, vl);
+      output =
+          __riscv_vmin_vx_i32m4(output, params.quantized_activation_max, vl);
+      const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+      const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+      __riscv_vse8_v_i8m1(output_data + i, narrowed_i8, vl);
+      i += vl;
+    }
+  } else if constexpr (std::is_same<T, uint8_t>::value) {
+    for (; i < flat_size;) {
+      const size_t vl = __riscv_vsetvl_e8m1(flat_size - i);
+      const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input_data + i, vl);
+      const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
+      vint32m4_t output = __riscv_vsub_vx_i32m4(
+          __riscv_vreinterpret_v_u32m4_i32m4(
+              __riscv_vzext_vf2_u32m4(input_u16, vl)),
+          params.input_offset, vl);
+      output = rvv_ops::MultiplyByQuantizedMultiplier(
+          output, params.output_multiplier, params.output_shift, vl);
+      output = __riscv_vadd_vx_i32m4(output, params.output_offset, vl);
+      output =
+          __riscv_vmax_vx_i32m4(output, params.quantized_activation_min, vl);
+      output =
+          __riscv_vmin_vx_i32m4(output, params.quantized_activation_max, vl);
+      const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+      const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+      __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
+                          narrowed_i8, vl);
+      i += vl;
+    }
+  } else if constexpr (std::is_same<T, int16_t>::value) {
+    for (; i < flat_size;) {
+      const size_t vl = __riscv_vsetvl_e16m2(flat_size - i);
+      const vint16m2_t input_i16 = __riscv_vle16_v_i16m2(input_data + i, vl);
+      vint32m4_t output = __riscv_vsub_vx_i32m4(
+          __riscv_vsext_vf2_i32m4(input_i16, vl), params.input_offset, vl);
+      output = rvv_ops::MultiplyByQuantizedMultiplier(
+          output, params.output_multiplier, params.output_shift, vl);
+      output = __riscv_vadd_vx_i32m4(output, params.output_offset, vl);
+      output =
+          __riscv_vmax_vx_i32m4(output, params.quantized_activation_min, vl);
+      output =
+          __riscv_vmin_vx_i32m4(output, params.quantized_activation_max, vl);
+      const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+      __riscv_vse16_v_i16m2(output_data + i, narrowed_i16, vl);
+      i += vl;
+    }
+  }
+#endif  // USE_RVV && !TFLITE_SINGLE_ROUNDING
+
+  for (; i < flat_size; ++i) {
+    const int32_t val = static_cast<int32_t>(input_data[i]);
+    int32_t clamped = params.output_offset +
+                      MultiplyByQuantizedMultiplier(val - params.input_offset,
+                                                    params.output_multiplier,
+                                                    params.output_shift);
+    clamped = std::max(params.quantized_activation_min, clamped);
+    clamped = std::min(params.quantized_activation_max, clamped);
+    output_data[i] = static_cast<T>(clamped);
+  }
+}
+
+template <typename T>
+inline void ReluX(const tflite::ActivationParams& params,
+                  const RuntimeShape& input_shape, const T* input_data,
+                  const RuntimeShape& output_shape, T* output_data) {
+  ruy::profiler::ScopeLabel label("Quantized ReluX (not fused)");
+  const int flat_size = MatchingFlatSize(input_shape, output_shape);
+  const T max_value = params.quantized_activation_max;
+  const T min_value = params.quantized_activation_min;
+  int i = 0;
+
+#if defined(USE_RVV)
+  if constexpr (std::is_same<T, int8_t>::value) {
+    for (; i < flat_size;) {
+      const size_t vl = __riscv_vsetvl_e8m1(flat_size - i);
+      vint8m1_t input = __riscv_vle8_v_i8m1(input_data + i, vl);
+      input = __riscv_vmax_vx_i8m1(input, min_value, vl);
+      input = __riscv_vmin_vx_i8m1(input, max_value, vl);
+      __riscv_vse8_v_i8m1(output_data + i, input, vl);
+      i += vl;
+    }
+  } else if constexpr (std::is_same<T, uint8_t>::value) {
+    for (; i < flat_size;) {
+      const size_t vl = __riscv_vsetvl_e8m1(flat_size - i);
+      vuint8m1_t input = __riscv_vle8_v_u8m1(input_data + i, vl);
+      input = __riscv_vmaxu_vx_u8m1(input, min_value, vl);
+      input = __riscv_vminu_vx_u8m1(input, max_value, vl);
+      __riscv_vse8_v_u8m1(output_data + i, input, vl);
+      i += vl;
+    }
+  } else if constexpr (std::is_same<T, int16_t>::value) {
+    for (; i < flat_size;) {
+      const size_t vl = __riscv_vsetvl_e16m2(flat_size - i);
+      vint16m2_t input = __riscv_vle16_v_i16m2(input_data + i, vl);
+      input = __riscv_vmax_vx_i16m2(input, min_value, vl);
+      input = __riscv_vmin_vx_i16m2(input, max_value, vl);
+      __riscv_vse16_v_i16m2(output_data + i, input, vl);
+      i += vl;
+    }
+  }
+#endif  // USE_RVV
+
+  for (; i < flat_size; ++i) {
+    const T val = input_data[i];
+    const T clamped = val > max_value   ? max_value
+                      : val < min_value ? min_value
+                                        : val;
+    output_data[i] = clamped;
+  }
 }
 
 inline void L2Normalization(const tflite::L2NormalizationParams& op_params,
