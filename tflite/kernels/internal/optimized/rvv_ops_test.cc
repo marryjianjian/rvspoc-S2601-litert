@@ -26,6 +26,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/integer_ops/pooling.h"
 #include "tflite/kernels/internal/optimized/integer_ops/sub.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
+#include "tflite/kernels/internal/optimized/reduce.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/reference/add.h"
 #include "tflite/kernels/internal/reference/div.h"
@@ -539,6 +540,185 @@ TEST(RvvOpsTest, FloatL2PoolMatchesReferenceAcrossVectorBoundaries) {
 
     EXPECT_THAT(actual, Pointwise(FloatNear(1e-5f), expected))
         << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest, FloatReduceMaxLastAxisMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kOuterSize = 3;
+  const int axis[] = {1};
+
+  for (int axis_size : Float32M4VectorLengths()) {
+    if (axis_size == 0) {
+      continue;
+    }
+    const int input_dims[] = {kOuterSize, axis_size};
+    const int output_dims[] = {kOuterSize};
+    int resolved_axis[2];
+    int normalized_dims[2];
+    const std::vector<float> input =
+        MakeInput(kOuterSize * axis_size, -0.125f);
+    std::vector<float> actual(kOuterSize);
+    std::vector<float> expected(kOuterSize,
+                                std::numeric_limits<float>::lowest());
+
+    EXPECT_TRUE(optimized_ops::ReduceGeneric(
+        input.data(), input_dims, 2, actual.data(), output_dims, 1, axis, 1,
+        resolved_axis, normalized_dims, ops::builtin::reduce::kMax));
+    for (int outer = 0; outer < kOuterSize; ++outer) {
+      for (int i = 0; i < axis_size; ++i) {
+        expected[outer] =
+            std::max(expected[outer], input[outer * axis_size + i]);
+      }
+    }
+
+    EXPECT_THAT(actual, ElementsAreArray(expected))
+        << "axis_size=" << axis_size;
+  }
+}
+
+TEST(RvvOpsTest, FloatReduceMinLastAxisMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kOuterSize = 3;
+  const int axis[] = {1};
+
+  for (int axis_size : Float32M4VectorLengths()) {
+    if (axis_size == 0) {
+      continue;
+    }
+    const int input_dims[] = {kOuterSize, axis_size};
+    const int output_dims[] = {kOuterSize};
+    int resolved_axis[2];
+    int normalized_dims[2];
+    const std::vector<float> input =
+        MakeInput(kOuterSize * axis_size, 0.375f);
+    std::vector<float> actual(kOuterSize);
+    std::vector<float> expected(kOuterSize, std::numeric_limits<float>::max());
+
+    EXPECT_TRUE(optimized_ops::ReduceGeneric(
+        input.data(), input_dims, 2, actual.data(), output_dims, 1, axis, 1,
+        resolved_axis, normalized_dims, ops::builtin::reduce::kMin));
+    for (int outer = 0; outer < kOuterSize; ++outer) {
+      for (int i = 0; i < axis_size; ++i) {
+        expected[outer] =
+            std::min(expected[outer], input[outer * axis_size + i]);
+      }
+    }
+
+    EXPECT_THAT(actual, ElementsAreArray(expected))
+        << "axis_size=" << axis_size;
+  }
+}
+
+TEST(RvvOpsTest, FloatReduceSumLastAxisMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kOuterSize = 3;
+  const int axis[] = {1};
+
+  for (int axis_size : Float32M4VectorLengths()) {
+    if (axis_size == 0) {
+      continue;
+    }
+    const int input_dims[] = {kOuterSize, axis_size};
+    const int output_dims[] = {kOuterSize};
+    int resolved_axis[2];
+    int normalized_dims[2];
+    const std::vector<float> input =
+        MakeInput(kOuterSize * axis_size, -0.5f);
+    std::vector<float> actual(kOuterSize);
+    std::vector<float> expected(kOuterSize, 0.0f);
+
+    EXPECT_TRUE(optimized_ops::ReduceGeneric(
+        input.data(), input_dims, 2, actual.data(), output_dims, 1, axis, 1,
+        resolved_axis, normalized_dims, ops::builtin::reduce::kSum));
+    for (int outer = 0; outer < kOuterSize; ++outer) {
+      for (int i = 0; i < axis_size; ++i) {
+        expected[outer] += input[outer * axis_size + i];
+      }
+    }
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-5f), expected))
+        << "axis_size=" << axis_size;
+  }
+}
+
+TEST(RvvOpsTest, FloatMeanLastAxisMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kOuterSize = 3;
+  const int axis[] = {1};
+
+  for (int axis_size : Float32M4VectorLengths()) {
+    if (axis_size == 0) {
+      continue;
+    }
+    const int input_dims[] = {kOuterSize, axis_size};
+    const int output_dims[] = {kOuterSize};
+    int resolved_axis[2];
+    int normalized_dims[2];
+    std::vector<float> temp_sum(kOuterSize);
+    const std::vector<float> input =
+        MakeInput(kOuterSize * axis_size, 0.25f);
+    std::vector<float> actual(kOuterSize);
+    std::vector<float> expected(kOuterSize, 0.0f);
+
+    EXPECT_TRUE((optimized_ops::Mean<float, float>(
+        input.data(), input_dims, 2, actual.data(), output_dims, 1, axis, 1,
+        false, normalized_dims, resolved_axis, temp_sum.data())));
+    for (int outer = 0; outer < kOuterSize; ++outer) {
+      for (int i = 0; i < axis_size; ++i) {
+        expected[outer] += input[outer * axis_size + i];
+      }
+      expected[outer] /= static_cast<float>(axis_size);
+    }
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "axis_size=" << axis_size;
+  }
+}
+
+TEST(RvvOpsTest, FloatArgMaxLastAxisMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kOuterSize = 3;
+  const int axis[] = {1};
+
+  for (int axis_size : Float32M4VectorLengths()) {
+    if (axis_size == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({kOuterSize, axis_size});
+    const RuntimeShape output_shape({kOuterSize});
+    const std::vector<float> input =
+        MakeInput(kOuterSize * axis_size, -0.75f);
+    std::vector<int32_t> actual(kOuterSize);
+    std::vector<int32_t> expected(kOuterSize);
+
+    optimized_ops::ArgMax(input_shape, input.data(), axis, output_shape,
+                          actual.data());
+    reference_ops::ArgMax(input_shape, input.data(), axis, output_shape,
+                          expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected))
+        << "axis_size=" << axis_size;
+  }
+}
+
+TEST(RvvOpsTest, FloatArgMinLastAxisMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kOuterSize = 3;
+  const int axis[] = {1};
+
+  for (int axis_size : Float32M4VectorLengths()) {
+    if (axis_size == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({kOuterSize, axis_size});
+    const RuntimeShape output_shape({kOuterSize});
+    const std::vector<float> input =
+        MakeInput(kOuterSize * axis_size, 0.75f);
+    std::vector<int32_t> actual(kOuterSize);
+    std::vector<int32_t> expected(kOuterSize);
+
+    optimized_ops::ArgMinMax(input_shape, input.data(), axis, output_shape,
+                             actual.data(), /*is_arg_max=*/false);
+    reference_ops::ArgMinMax(input_shape, input.data(), axis, output_shape,
+                             expected.data(), /*is_arg_max=*/false);
+
+    EXPECT_THAT(actual, ElementsAreArray(expected))
+        << "axis_size=" << axis_size;
   }
 }
 

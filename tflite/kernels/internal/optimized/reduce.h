@@ -19,12 +19,14 @@ limitations under the License.
 
 #include <algorithm>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/kernels/cpu_backend_threadpool.h"
 #include "tflite/kernels/internal/optimized/optimized_ops_utils.h"
 #include "tflite/kernels/internal/optimized/reduce_utils.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/reduce_common.h"
 #include "tflite/kernels/internal/reference/reduce.h"
 #include "tflite/kernels/internal/runtime_shape.h"
@@ -33,6 +35,8 @@ limitations under the License.
 
 namespace tflite {
 namespace optimized_ops {
+
+using ops::builtin::reduce::ReduceType;
 
 inline void MeanImpl(const tflite::MeanParams& op_params,
                      const RuntimeShape& input_shape, const uint8_t* input_data,
@@ -308,6 +312,74 @@ struct OrOp {
   static constexpr bool kNeutralElement = false;
 };
 
+#if defined(USE_RVV)
+inline float RvvReduceLastAxisFloat(const float* input_data, int axis_size,
+                                    ReduceType reduce_type) {
+  float result;
+  switch (reduce_type) {
+    case ReduceType::kSum:
+      result = 0.0f;
+      break;
+    case ReduceType::kMax:
+      result = std::numeric_limits<float>::lowest();
+      break;
+    case ReduceType::kMin:
+      result = std::numeric_limits<float>::max();
+      break;
+    default:
+      return 0.0f;
+  }
+
+  for (int i = 0; i < axis_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(axis_size - i);
+    const vfloat32m4_t input =
+        __riscv_vle32_v_f32m4(input_data + i, vl);
+    vfloat32m1_t scalar = __riscv_vfmv_v_f_f32m1(result, 1);
+    switch (reduce_type) {
+      case ReduceType::kSum:
+        scalar = __riscv_vfredusum_vs_f32m4_f32m1(input, scalar, vl);
+        break;
+      case ReduceType::kMax:
+        scalar = __riscv_vfredmax_vs_f32m4_f32m1(input, scalar, vl);
+        break;
+      case ReduceType::kMin:
+        scalar = __riscv_vfredmin_vs_f32m4_f32m1(input, scalar, vl);
+        break;
+      default:
+        break;
+    }
+    result = __riscv_vfmv_f_s_f32m1_f32(scalar);
+    i += vl;
+  }
+  return result;
+}
+
+inline bool RvvReduceLastAxisFloat(const float* input_data,
+                                   const int* normalized_dims,
+                                   int normalized_num_dims,
+                                   const int* resolved_axis,
+                                   int num_resolved_axis, float* output_data,
+                                   ReduceType reduce_type) {
+  if (normalized_num_dims <= 1 || num_resolved_axis != 1 ||
+      resolved_axis[0] != normalized_num_dims - 1 ||
+      (reduce_type != ReduceType::kSum && reduce_type != ReduceType::kMax &&
+       reduce_type != ReduceType::kMin)) {
+    return false;
+  }
+
+  int output_size = 1;
+  for (int i = 0; i < normalized_num_dims - 1; ++i) {
+    output_size *= normalized_dims[i];
+  }
+  const int axis_size = normalized_dims[normalized_num_dims - 1];
+  for (int outer = 0; outer < output_size; ++outer) {
+    output_data[outer] = RvvReduceLastAxisFloat(
+        input_data + outer * axis_size, axis_size, reduce_type);
+  }
+  return true;
+}
+#endif  // USE_RVV
+
 // When the number of axis is zero, the reduction is simply a copy.
 template <typename T>
 void ReduceIsCopy(const T* input_data, const int* input_dims,
@@ -491,8 +563,6 @@ bool QuantizedMeanOrSum(const T* input_data, int32_t input_zero_point,
   }
   return true;
 }
-
-using ops::builtin::reduce::ReduceType;
 
 template <typename T>
 inline bool ReduceDispatcher(const T* input_data, const int* input_dims,
@@ -763,6 +833,16 @@ inline bool Mean<float, float>(const float* input_data, const int* input_dims,
     int output_size = normalized_dims[0];
     const int last_input_dim = normalized_dims[1];
 
+#if defined(USE_RVV)
+    for (int outer = 0; outer < output_size; ++outer) {
+      output_data[outer] =
+          RvvReduceLastAxisFloat(input_data + outer * last_input_dim,
+                                 last_input_dim, ReduceType::kSum) /
+          static_cast<float>(last_input_dim);
+    }
+    return true;
+#endif  // USE_RVV
+
     // TODO(b/152563685): Consider use eigen to cover more general cases.
     const MatrixMap<const float> in_mat(input_data, last_input_dim,
                                         output_size);
@@ -797,6 +877,15 @@ inline bool ReduceGeneric(const T* input_data, const int* input_dims,
                                 output_data);
     return true;
   }
+#if defined(USE_RVV)
+  if constexpr (std::is_same<T, float>::value) {
+    if (RvvReduceLastAxisFloat(input_data, normalized_dims, normalized_num_dims,
+                               resolved_axis, num_resolved_axis, output_data,
+                               reduce_type)) {
+      return true;
+    }
+  }
+#endif  // USE_RVV
   return ReduceDispatcher(input_data, normalized_dims, normalized_num_dims,
                           output_dims, output_num_dims, output_data,
                           resolved_axis, num_resolved_axis, reduce_type);

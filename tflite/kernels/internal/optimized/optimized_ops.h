@@ -8604,6 +8604,33 @@ inline int ArgMaxVector(const uint8_t* input_data, int size) {
 
 // Specializes ArgMinMax function with axis=dims-1.
 // In this case, ArgMinMax reduction is applied on contiguous memory.
+#if defined(USE_RVV)
+template <bool is_arg_max>
+inline int RvvArgMinMaxValueFirstIndexFloat(const float* input_data, int size) {
+  float selected_value = is_arg_max ? std::numeric_limits<float>::lowest()
+                                    : std::numeric_limits<float>::max();
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vfloat32m4_t input =
+        __riscv_vle32_v_f32m4(input_data + i, vl);
+    vfloat32m1_t scalar = __riscv_vfmv_v_f_f32m1(selected_value, 1);
+    if constexpr (is_arg_max) {
+      scalar = __riscv_vfredmax_vs_f32m4_f32m1(input, scalar, vl);
+    } else {
+      scalar = __riscv_vfredmin_vs_f32m4_f32m1(input, scalar, vl);
+    }
+    selected_value = __riscv_vfmv_f_s_f32m1_f32(scalar);
+    i += vl;
+  }
+  for (int i = 0; i < size; ++i) {
+    if (input_data[i] == selected_value) {
+      return i;
+    }
+  }
+  return 0;
+}
+#endif  // USE_RVV
+
 template <typename T1, typename T2, bool is_arg_max>
 inline void ArgMinMaxLastAxis(const RuntimeShape& input_shape,
                               const T1* input_data,
@@ -8616,6 +8643,14 @@ inline void ArgMinMaxLastAxis(const RuntimeShape& input_shape,
   int outer_size = input_shape.Dims(0);
   int axis_size = input_shape.Dims(1);
   for (int outer = 0; outer < outer_size; ++outer) {
+#if defined(USE_RVV)
+    if constexpr (std::is_same<T1, float>::value) {
+      output_data[outer] = static_cast<T2>(
+          RvvArgMinMaxValueFirstIndexFloat<is_arg_max>(
+              input_data + outer * axis_size, axis_size));
+      continue;
+    }
+#endif  // USE_RVV
     if (is_arg_max) {
       output_data[outer] = static_cast<T2>(
           ArgMaxVector<T1>(input_data + outer * axis_size, axis_size));
