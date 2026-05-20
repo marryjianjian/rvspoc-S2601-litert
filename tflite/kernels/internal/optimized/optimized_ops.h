@@ -97,7 +97,6 @@ using reference_ops::Greater;
 using reference_ops::GreaterEqual;
 using reference_ops::GreaterEqualWithScaling;
 using reference_ops::GreaterWithScaling;
-using reference_ops::LeakyRelu;
 using reference_ops::Less;
 using reference_ops::LessEqual;
 using reference_ops::LessEqualWithScaling;
@@ -1421,6 +1420,35 @@ inline void Relu(const RuntimeShape& input_shape, const float* input_data,
 
   for (; i < flat_size; ++i) {
     output_data[i] = std::max(input_data[i], 0.0f);
+  }
+}
+
+inline void LeakyRelu(const tflite::LeakyReluParams& params,
+                      const RuntimeShape& input_shape, const float* input_data,
+                      const RuntimeShape& output_shape, float* output_data) {
+  ruy::profiler::ScopeLabel label("LeakyRelu/Float");
+  const int flat_size = MatchingFlatSize(input_shape, output_shape);
+
+  int i = 0;
+#if defined(USE_RVV)
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(flat_size - i);
+    const vfloat32m4_t input =
+        __riscv_vle32_v_f32m4(input_data + i, vl);
+    const vfloat32m4_t scaled =
+        __riscv_vfmul_vf_f32m4(input, params.alpha, vl);
+    const vbool8_t positive_mask =
+        __riscv_vmfgt_vf_f32m4_b8(input, 0.0f, vl);
+    const vfloat32m4_t output =
+        __riscv_vmerge_vvm_f32m4(scaled, input, positive_mask, vl);
+    __riscv_vse32_v_f32m4(output_data + i, output, vl);
+    i += vl;
+  }
+#endif  // USE_RVV
+
+  for (; i < flat_size; ++i) {
+    const float val = input_data[i];
+    output_data[i] = val > 0.0f ? val : val * params.alpha;
   }
 }
 

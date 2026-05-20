@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/avx2_quantization_utils.h"
+#include "tflite/kernels/internal/optimized/rvv_ops.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {
@@ -85,7 +86,41 @@ inline void QuantizeLeakyRelu(const LeakyReluParams& params,
     avx2_utils::CastInt32ToInt16AndStore(output_data + i, input_low);
     avx2_utils::CastInt32ToInt16AndStore(output_data + i + 8, input_high);
   }
-#endif  // __AVX2__
+#elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  const bool is_alpha_negative = params.output_multiplier_alpha < 0;
+  const int32_t alpha_multiplier = is_alpha_negative
+                                       ? -params.output_multiplier_alpha
+                                       : params.output_multiplier_alpha;
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e16m2(flat_size - i);
+    const vint16m2_t input_i16 =
+        __riscv_vle16_v_i16m2(input_data + i, vl);
+    const vint32m4_t input = __riscv_vsub_vx_i32m4(
+        __riscv_vsext_vf2_i32m4(input_i16, vl), params.input_offset, vl);
+    const vbool8_t identity_mask =
+        __riscv_vmsge_vx_i32m4_b8(input, 0, vl);
+
+    vint32m4_t identity_output = rvv_ops::MultiplyByQuantizedMultiplier(
+        input, params.output_multiplier_identity,
+        params.output_shift_identity, vl);
+    vint32m4_t alpha_output = rvv_ops::MultiplyByQuantizedMultiplier(
+        input, alpha_multiplier, params.output_shift_alpha, vl);
+    if (is_alpha_negative) {
+      alpha_output = __riscv_vsub_vv_i32m4(
+          __riscv_vmv_v_x_i32m4(0, vl), alpha_output, vl);
+    }
+
+    vint32m4_t output =
+        __riscv_vmerge_vvm_i32m4(alpha_output, identity_output, identity_mask,
+                                 vl);
+    output = __riscv_vadd_vx_i32m4(output, params.output_offset, vl);
+    output = __riscv_vmax_vx_i32m4(output, quantized_min, vl);
+    output = __riscv_vmin_vx_i32m4(output, quantized_max, vl);
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+    __riscv_vse16_v_i16m2(output_data + i, narrowed_i16, vl);
+    i += vl;
+  }
+#endif  // __AVX2__ / USE_RVV
 
   for (; i < flat_size; ++i) {
     const int32_t input_value = input_data[i] - params.input_offset;

@@ -21,6 +21,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/integer_ops/add.h"
+#include "tflite/kernels/internal/optimized/integer_ops/leaky_relu.h"
 #include "tflite/kernels/internal/optimized/integer_ops/mul.h"
 #include "tflite/kernels/internal/optimized/integer_ops/sub.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
@@ -208,6 +209,23 @@ ReluParams MakeInt16ReluParams() {
   return params;
 }
 
+LeakyReluParams MakeFloatLeakyReluParams() {
+  LeakyReluParams params;
+  params.alpha = 0.125f;
+  return params;
+}
+
+LeakyReluParams MakeInt16LeakyReluParams() {
+  LeakyReluParams params;
+  params.input_offset = 0;
+  params.output_offset = 0;
+  params.output_multiplier_alpha = 1073741824;
+  params.output_shift_alpha = -2;
+  params.output_multiplier_identity = 1073741824;
+  params.output_shift_identity = 1;
+  return params;
+}
+
 // Reuse these lengths for future RVV tests so every vectorized kernel gets
 // coverage around its real strip-mining boundary.
 std::vector<int> VectorLengthsAroundVlmax(int vlmax) {
@@ -354,6 +372,24 @@ TEST(RvvOpsTest, FloatReluMatchesReferenceAcrossVectorBoundaries) {
 
     optimized_ops::Relu(shape, input.data(), shape, actual.data());
     reference_ops::Relu(shape, input.data(), shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, FloatLeakyReluMatchesReferenceAcrossVectorBoundaries) {
+  const LeakyReluParams params = MakeFloatLeakyReluParams();
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input = MakeInput(size, -0.5f);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::LeakyRelu(params, shape, input.data(), shape,
+                             actual.data());
+    reference_ops::LeakyRelu(params, shape, input.data(), shape,
+                             expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
   }
@@ -727,6 +763,24 @@ TEST(RvvOpsTest, Int16AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
         size, params, input1.data(), input2.data(), actual.data());
     reference_ops::AddElementwise(size, params, input1.data(), input2.data(),
                                   expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, Int16LeakyReluMatchesReferenceAcrossVectorBoundaries) {
+  const LeakyReluParams params = MakeInt16LeakyReluParams();
+
+  for (int size : Int16M2VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<int16_t> input = MakeInt16Input(size, 3907);
+    std::vector<int16_t> actual(size);
+    std::vector<int16_t> expected(size);
+
+    optimized_integer_ops::QuantizeLeakyRelu(
+        params, shape, input.data(), shape, actual.data());
+    reference_ops::QuantizeLeakyRelu(params, shape, input.data(), shape,
+                                     expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
   }
