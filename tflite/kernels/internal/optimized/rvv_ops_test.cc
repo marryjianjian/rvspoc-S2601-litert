@@ -23,6 +23,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/integer_ops/add.h"
 #include "tflite/kernels/internal/optimized/integer_ops/leaky_relu.h"
 #include "tflite/kernels/internal/optimized/integer_ops/mul.h"
+#include "tflite/kernels/internal/optimized/integer_ops/pooling.h"
 #include "tflite/kernels/internal/optimized/integer_ops/sub.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
@@ -30,6 +31,7 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/div.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
 #include "tflite/kernels/internal/reference/integer_ops/mul.h"
+#include "tflite/kernels/internal/reference/integer_ops/pooling.h"
 #include "tflite/kernels/internal/reference/mul.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/reference/sub.h"
@@ -226,6 +228,45 @@ LeakyReluParams MakeInt16LeakyReluParams() {
   return params;
 }
 
+PoolParams MakeFloatPoolParams() {
+  PoolParams params;
+  params.padding_values.height = 1;
+  params.padding_values.width = 1;
+  params.stride_height = 1;
+  params.stride_width = 2;
+  params.filter_height = 2;
+  params.filter_width = 3;
+  params.float_activation_min = -1.75f;
+  params.float_activation_max = 2.25f;
+  return params;
+}
+
+PoolParams MakeUint8PoolParams() {
+  PoolParams params;
+  params.padding_values.height = 1;
+  params.padding_values.width = 1;
+  params.stride_height = 1;
+  params.stride_width = 2;
+  params.filter_height = 2;
+  params.filter_width = 3;
+  params.quantized_activation_min = 13;
+  params.quantized_activation_max = 231;
+  return params;
+}
+
+PoolParams MakeInt8PoolParams() {
+  PoolParams params;
+  params.padding_values.height = 1;
+  params.padding_values.width = 1;
+  params.stride_height = 1;
+  params.stride_width = 2;
+  params.filter_height = 2;
+  params.filter_width = 3;
+  params.quantized_activation_min = -80;
+  params.quantized_activation_max = 91;
+  return params;
+}
+
 // Reuse these lengths for future RVV tests so every vectorized kernel gets
 // coverage around its real strip-mining boundary.
 std::vector<int> VectorLengthsAroundVlmax(int vlmax) {
@@ -338,6 +379,166 @@ TEST(RvvOpsTest, BiasAndClampMatchesScalarReferenceAcrossVectorBoundaries) {
 
     EXPECT_THAT(actual, ElementsAreArray(expected))
         << "bias_size=" << bias_size;
+  }
+}
+
+TEST(RvvOpsTest, FloatMaxPoolMatchesReferenceAcrossVectorBoundaries) {
+  const PoolParams params = MakeFloatPoolParams();
+
+  for (int depth : Float32M4VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({1, 4, 5, depth});
+    const RuntimeShape output_shape({1, 4, 3, depth});
+    const std::vector<float> input = MakeInput(input_shape.FlatSize(), -0.25f);
+    std::vector<float> actual(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    optimized_ops::MaxPool(params, input_shape, input.data(), output_shape,
+                           actual.data());
+    reference_ops::MaxPool(params, input_shape, input.data(), output_shape,
+                           expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest, Uint8MaxPoolMatchesReferenceAcrossVectorBoundaries) {
+  const PoolParams params = MakeUint8PoolParams();
+
+  for (int depth : Int8M1VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({1, 4, 5, depth});
+    const RuntimeShape output_shape({1, 4, 3, depth});
+    const std::vector<uint8_t> input =
+        MakeUint8Input(input_shape.FlatSize(), 43);
+    std::vector<uint8_t> actual(output_shape.FlatSize());
+    std::vector<uint8_t> expected(output_shape.FlatSize());
+
+    optimized_ops::MaxPool(params, input_shape, input.data(), output_shape,
+                           actual.data());
+    reference_ops::MaxPool(params, input_shape, input.data(), output_shape,
+                           expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest, Int8MaxPoolMatchesReferenceAcrossVectorBoundaries) {
+  const PoolParams params = MakeInt8PoolParams();
+
+  for (int depth : Int8M1VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({1, 4, 5, depth});
+    const RuntimeShape output_shape({1, 4, 3, depth});
+    const std::vector<int8_t> input = MakeInt8Input(input_shape.FlatSize(), 37);
+    std::vector<int8_t> actual(output_shape.FlatSize());
+    std::vector<int8_t> expected(output_shape.FlatSize());
+
+    optimized_integer_ops::MaxPool(params, input_shape, input.data(),
+                                   output_shape, actual.data());
+    reference_integer_ops::MaxPool(params, input_shape, input.data(),
+                                   output_shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest, FloatAveragePoolMatchesReferenceAcrossVectorBoundaries) {
+  const PoolParams params = MakeFloatPoolParams();
+
+  for (int depth : Float32M4VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({1, 4, 5, depth});
+    const RuntimeShape output_shape({1, 4, 3, depth});
+    const std::vector<float> input = MakeInput(input_shape.FlatSize(), 0.125f);
+    std::vector<float> actual(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    EXPECT_TRUE(optimized_ops::AveragePool(
+        params, input_shape, input.data(), output_shape, actual.data()));
+    EXPECT_TRUE(reference_ops::AveragePool(
+        params, input_shape, input.data(), output_shape, expected.data()));
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest, Uint8AveragePoolMatchesReferenceAcrossVectorBoundaries) {
+  const PoolParams params = MakeUint8PoolParams();
+
+  for (int depth : Int8M1VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({1, 4, 5, depth});
+    const RuntimeShape output_shape({1, 4, 3, depth});
+    const std::vector<uint8_t> input =
+        MakeUint8Input(input_shape.FlatSize(), 89);
+    std::vector<uint8_t> actual(output_shape.FlatSize());
+    std::vector<uint8_t> expected(output_shape.FlatSize());
+
+    EXPECT_TRUE(optimized_ops::AveragePool(
+        params, input_shape, input.data(), output_shape, actual.data()));
+    EXPECT_TRUE(reference_ops::AveragePool(
+        params, input_shape, input.data(), output_shape, expected.data()));
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest, Int8AveragePoolMatchesReferenceAcrossVectorBoundaries) {
+  const PoolParams params = MakeInt8PoolParams();
+
+  for (int depth : Int8M1VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({1, 4, 5, depth});
+    const RuntimeShape output_shape({1, 4, 3, depth});
+    const std::vector<int8_t> input = MakeInt8Input(input_shape.FlatSize(), 181);
+    std::vector<int8_t> actual(output_shape.FlatSize());
+    std::vector<int8_t> expected(output_shape.FlatSize());
+
+    EXPECT_TRUE(optimized_integer_ops::AveragePool(
+        params, input_shape, input.data(), output_shape, actual.data()));
+    EXPECT_TRUE(reference_integer_ops::AveragePool(
+        params, input_shape, input.data(), output_shape, expected.data()));
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest, FloatL2PoolMatchesReferenceAcrossVectorBoundaries) {
+  PoolParams params = MakeFloatPoolParams();
+  params.float_activation_min = 0.25f;
+  params.float_activation_max = 3.0f;
+
+  for (int depth : Float32M4VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({1, 4, 5, depth});
+    const RuntimeShape output_shape({1, 4, 3, depth});
+    const std::vector<float> input = MakeInput(input_shape.FlatSize(), -0.5f);
+    std::vector<float> actual(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    optimized_ops::L2Pool(params, input_shape, input.data(), output_shape,
+                          actual.data());
+    reference_ops::L2Pool(params, input_shape, input.data(), output_shape,
+                          expected.data());
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-5f), expected))
+        << "depth=" << depth;
   }
 }
 

@@ -3560,6 +3560,7 @@ inline bool AveragePool(const PoolParams& params,
   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
   const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int depth = MatchingDim(input_shape, 3, output_shape, 3);
   const int input_height = input_shape.Dims(1);
   const int input_width = input_shape.Dims(2);
   const int output_height = output_shape.Dims(1);
@@ -3569,6 +3570,57 @@ inline bool AveragePool(const PoolParams& params,
 
   if (stride_height == 0) return false;
   if (stride_width == 0) return false;
+
+#if defined(USE_RVV)
+  for (int batch = 0; batch < batches; ++batch) {
+    for (int out_y = 0; out_y < output_height; ++out_y) {
+      for (int out_x = 0; out_x < output_width; ++out_x) {
+        const int in_x_origin =
+            (out_x * stride_width) - params.padding_values.width;
+        const int in_y_origin =
+            (out_y * stride_height) - params.padding_values.height;
+        const int filter_x_start = std::max(0, -in_x_origin);
+        const int filter_x_end =
+            std::min(params.filter_width, input_width - in_x_origin);
+        const int filter_y_start = std::max(0, -in_y_origin);
+        const int filter_y_end =
+            std::min(params.filter_height, input_height - in_y_origin);
+        const int filter_count =
+            (filter_x_end - filter_x_start) * (filter_y_end - filter_y_start);
+        if (filter_count == 0) return false;
+        for (int channel = 0; channel < depth;) {
+          const size_t vl = __riscv_vsetvl_e32m4(depth - channel);
+          vfloat32m4_t sum = __riscv_vfmv_v_f_f32m4(0.0f, vl);
+          for (int filter_y = filter_y_start; filter_y < filter_y_end;
+               ++filter_y) {
+            for (int filter_x = filter_x_start; filter_x < filter_x_end;
+                 ++filter_x) {
+              const int in_x = in_x_origin + filter_x;
+              const int in_y = in_y_origin + filter_y;
+              const float* input_ptr =
+                  input_data + Offset(input_shape, batch, in_y, in_x, channel);
+              const vfloat32m4_t input =
+                  __riscv_vle32_v_f32m4(input_ptr, vl);
+              sum = __riscv_vfadd_vv_f32m4(sum, input, vl);
+            }
+          }
+          vfloat32m4_t output =
+              __riscv_vfdiv_vf_f32m4(sum, static_cast<float>(filter_count),
+                                     vl);
+          output = __riscv_vfmax_vf_f32m4(
+              output, params.float_activation_min, vl);
+          output = __riscv_vfmin_vf_f32m4(
+              output, params.float_activation_max, vl);
+          __riscv_vse32_v_f32m4(
+              output_data + Offset(output_shape, batch, out_y, out_x, channel),
+              output, vl);
+          channel += vl;
+        }
+      }
+    }
+  }
+  return true;
+#endif  // USE_RVV
 
   // TODO(benoitjacob) make this a proper reference impl without Eigen!
   const auto in_mat = MapAsMatrixWithLastDimAsRows(input_data, input_shape);
@@ -3708,6 +3760,21 @@ inline bool AveragePool(const PoolParams& params,
                       vaddw_u16(vld1q_u32(acc + channel + 4 * i), acc_reg[i]));
                 }
               }
+#elif defined(USE_RVV)
+              for (; channel < tranche_depth;) {
+                const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+                const vuint8m1_t input =
+                    __riscv_vle8_v_u8m1(input_channel_ptr, vl);
+                const vuint32m4_t input_wide =
+                    __riscv_vzext_vf4_u32m4(input, vl);
+                const vuint32m4_t acc_reg =
+                    __riscv_vle32_v_u32m4(acc + channel, vl);
+                __riscv_vse32_v_u32m4(
+                    acc + channel,
+                    __riscv_vadd_vv_u32m4(acc_reg, input_wide, vl), vl);
+                input_channel_ptr += vl;
+                channel += vl;
+              }
 #endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] += *input_channel_ptr++;
@@ -3766,12 +3833,59 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
   const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int depth = MatchingDim(input_shape, 3, output_shape, 3);
   const int input_height = input_shape.Dims(1);
   const int input_width = input_shape.Dims(2);
   const int output_height = output_shape.Dims(1);
   const int output_width = output_shape.Dims(2);
   const int stride_height = params.stride_height;
   const int stride_width = params.stride_width;
+
+#if defined(USE_RVV)
+  for (int batch = 0; batch < batches; ++batch) {
+    for (int out_y = 0; out_y < output_height; ++out_y) {
+      for (int out_x = 0; out_x < output_width; ++out_x) {
+        const int in_x_origin =
+            (out_x * stride_width) - params.padding_values.width;
+        const int in_y_origin =
+            (out_y * stride_height) - params.padding_values.height;
+        const int filter_x_start = std::max(0, -in_x_origin);
+        const int filter_x_end =
+            std::min(params.filter_width, input_width - in_x_origin);
+        const int filter_y_start = std::max(0, -in_y_origin);
+        const int filter_y_end =
+            std::min(params.filter_height, input_height - in_y_origin);
+        for (int channel = 0; channel < depth;) {
+          const size_t vl = __riscv_vsetvl_e32m4(depth - channel);
+          vfloat32m4_t output = __riscv_vfmv_v_f_f32m4(
+              std::numeric_limits<float>::lowest(), vl);
+          for (int filter_y = filter_y_start; filter_y < filter_y_end;
+               ++filter_y) {
+            for (int filter_x = filter_x_start; filter_x < filter_x_end;
+                 ++filter_x) {
+              const int in_x = in_x_origin + filter_x;
+              const int in_y = in_y_origin + filter_y;
+              const float* input_ptr =
+                  input_data + Offset(input_shape, batch, in_y, in_x, channel);
+              const vfloat32m4_t input =
+                  __riscv_vle32_v_f32m4(input_ptr, vl);
+              output = __riscv_vfmax_vv_f32m4(output, input, vl);
+            }
+          }
+          output = __riscv_vfmax_vf_f32m4(
+              output, params.float_activation_min, vl);
+          output = __riscv_vfmin_vf_f32m4(
+              output, params.float_activation_max, vl);
+          __riscv_vse32_v_f32m4(
+              output_data + Offset(output_shape, batch, out_y, out_x, channel),
+              output, vl);
+          channel += vl;
+        }
+      }
+    }
+  }
+  return;
+#endif  // USE_RVV
 
   const auto in_mat = MapAsMatrixWithLastDimAsRows(input_data, input_shape);
   auto out_mat = MapAsMatrixWithLastDimAsRows(output_data, output_shape);
@@ -3886,6 +4000,19 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
                 acc_reg = vmax_u8(acc_reg, input_reg);
                 vst1_u8(acc + channel, acc_reg);
               }
+#elif defined(USE_RVV)
+              for (; channel < tranche_depth;) {
+                const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+                const vuint8m1_t acc_reg =
+                    __riscv_vle8_v_u8m1(acc + channel, vl);
+                const vuint8m1_t input =
+                    __riscv_vle8_v_u8m1(input_channel_ptr, vl);
+                __riscv_vse8_v_u8m1(
+                    acc + channel, __riscv_vmaxu_vv_u8m1(acc_reg, input, vl),
+                    vl);
+                input_channel_ptr += vl;
+                channel += vl;
+              }
 #endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] = std::max(acc[channel], *input_channel_ptr++);
@@ -3909,6 +4036,17 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
             a = vmax_u8(a, vdup_n_u8(params.quantized_activation_min));
             vst1_u8(output_ptr + channel, a);
           }
+#elif defined(USE_RVV)
+          for (; channel < tranche_depth;) {
+            const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+            vuint8m1_t output = __riscv_vle8_v_u8m1(acc + channel, vl);
+            output = __riscv_vminu_vx_u8m1(
+                output, params.quantized_activation_max, vl);
+            output = __riscv_vmaxu_vx_u8m1(
+                output, params.quantized_activation_min, vl);
+            __riscv_vse8_v_u8m1(output_ptr + channel, output, vl);
+            channel += vl;
+          }
 #endif
           for (; channel < tranche_depth; ++channel) {
             uint8_t a = acc[channel];
@@ -3929,12 +4067,66 @@ inline void L2Pool(const PoolParams& params, const RuntimeShape& input_shape,
   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
   const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int depth = MatchingDim(input_shape, 3, output_shape, 3);
   const int input_height = input_shape.Dims(1);
   const int input_width = input_shape.Dims(2);
   const int output_height = output_shape.Dims(1);
   const int output_width = output_shape.Dims(2);
   const int stride_height = params.stride_height;
   const int stride_width = params.stride_width;
+
+#if defined(USE_RVV)
+  for (int batch = 0; batch < batches; ++batch) {
+    for (int out_y = 0; out_y < output_height; ++out_y) {
+      for (int out_x = 0; out_x < output_width; ++out_x) {
+        const int in_x_origin =
+            (out_x * stride_width) - params.padding_values.width;
+        const int in_y_origin =
+            (out_y * stride_height) - params.padding_values.height;
+        const int filter_x_start = std::max(0, -in_x_origin);
+        const int filter_x_end =
+            std::min(params.filter_width, input_width - in_x_origin);
+        const int filter_y_start = std::max(0, -in_y_origin);
+        const int filter_y_end =
+            std::min(params.filter_height, input_height - in_y_origin);
+        const int filter_count =
+            (filter_x_end - filter_x_start) * (filter_y_end - filter_y_start);
+        for (int channel = 0; channel < depth;) {
+          const size_t vl = __riscv_vsetvl_e32m4(depth - channel);
+          vfloat32m4_t sum_squares = __riscv_vfmv_v_f_f32m4(0.0f, vl);
+          for (int filter_y = filter_y_start; filter_y < filter_y_end;
+               ++filter_y) {
+            for (int filter_x = filter_x_start; filter_x < filter_x_end;
+                 ++filter_x) {
+              const int in_x = in_x_origin + filter_x;
+              const int in_y = in_y_origin + filter_y;
+              const float* input_ptr =
+                  input_data + Offset(input_shape, batch, in_y, in_x, channel);
+              const vfloat32m4_t input =
+                  __riscv_vle32_v_f32m4(input_ptr, vl);
+              sum_squares =
+                  __riscv_vfmacc_vv_f32m4(sum_squares, input, input, vl);
+            }
+          }
+          vfloat32m4_t output =
+              __riscv_vfdiv_vf_f32m4(sum_squares,
+                                     static_cast<float>(filter_count), vl);
+          output = __riscv_vfsqrt_v_f32m4(output, vl);
+          output = __riscv_vfmax_vf_f32m4(
+              output, params.float_activation_min, vl);
+          output = __riscv_vfmin_vf_f32m4(
+              output, params.float_activation_max, vl);
+          __riscv_vse32_v_f32m4(
+              output_data + Offset(output_shape, batch, out_y, out_x, channel),
+              output, vl);
+          channel += vl;
+        }
+      }
+    }
+  }
+  return;
+#endif  // USE_RVV
+
   // Actually carry out L2 Pool. Code is written in forward mode: we go through
   // the input values once, and write to all the pooled regions that it maps to.
   const auto in_mat = MapAsMatrixWithLastDimAsRows(input_data, input_shape);

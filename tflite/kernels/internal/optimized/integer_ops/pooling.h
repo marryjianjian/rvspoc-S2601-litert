@@ -25,6 +25,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/cpu_check.h"
 #include "tflite/kernels/internal/optimized/im2col_utils.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/strided_slice_logic.h"
@@ -108,6 +109,19 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
                 acc_reg = vmax_s8(acc_reg, input_reg);
                 vst1_s8(acc + channel, acc_reg);
               }
+#elif defined(USE_RVV)
+              for (; channel < tranche_depth;) {
+                const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+                const vint8m1_t acc_reg =
+                    __riscv_vle8_v_i8m1(acc + channel, vl);
+                const vint8m1_t input =
+                    __riscv_vle8_v_i8m1(input_channel_ptr, vl);
+                __riscv_vse8_v_i8m1(
+                    acc + channel, __riscv_vmax_vv_i8m1(acc_reg, input, vl),
+                    vl);
+                input_channel_ptr += vl;
+                channel += vl;
+              }
 #endif
               for (; channel < tranche_depth; ++channel) {
                 acc[channel] = std::max(acc[channel], *input_channel_ptr++);
@@ -130,6 +144,17 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
             a = vmin_s8(a, vdup_n_s8(params.quantized_activation_max));
             a = vmax_s8(a, vdup_n_s8(params.quantized_activation_min));
             vst1_s8(output_ptr + channel, a);
+          }
+#elif defined(USE_RVV)
+          for (; channel < tranche_depth;) {
+            const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+            vint8m1_t output = __riscv_vle8_v_i8m1(acc + channel, vl);
+            output = __riscv_vmin_vx_i8m1(
+                output, params.quantized_activation_max, vl);
+            output = __riscv_vmax_vx_i8m1(
+                output, params.quantized_activation_min, vl);
+            __riscv_vse8_v_i8m1(output_ptr + channel, output, vl);
+            channel += vl;
           }
 #endif
           for (; channel < tranche_depth; ++channel) {
@@ -231,6 +256,21 @@ inline bool AveragePool(const PoolParams& params,
                       acc + channel + 4 * i,
                       vaddw_s16(vld1q_s32(acc + channel + 4 * i), acc_reg[i]));
                 }
+              }
+#elif defined(USE_RVV)
+              for (; channel < tranche_depth;) {
+                const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+                const vint8m1_t input =
+                    __riscv_vle8_v_i8m1(input_channel_ptr, vl);
+                const vint32m4_t input_wide =
+                    __riscv_vsext_vf4_i32m4(input, vl);
+                const vint32m4_t acc_reg =
+                    __riscv_vle32_v_i32m4(acc + channel, vl);
+                __riscv_vse32_v_i32m4(
+                    acc + channel,
+                    __riscv_vadd_vv_i32m4(acc_reg, input_wide, vl), vl);
+                input_channel_ptr += vl;
+                channel += vl;
               }
 #endif
               for (; channel < tranche_depth; ++channel) {
