@@ -40,6 +40,8 @@ namespace {
 #ifdef USE_RVV
 
 using ::testing::ElementsAreArray;
+using ::testing::FloatNear;
+using ::testing::Pointwise;
 
 float Clamp(float value, float min, float max) {
   return std::min(max, std::max(min, value));
@@ -354,6 +356,21 @@ TEST(RvvOpsTest, FloatReluMatchesReferenceAcrossVectorBoundaries) {
     reference_ops::Relu(shape, input.data(), shape, expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, FloatHardSwishMatchesReferenceAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input = MakeInput(size, -0.875f);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::HardSwish(shape, input.data(), shape, actual.data());
+    reference_ops::HardSwish(shape, input.data(), shape, expected.data());
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "size=" << size;
   }
 }
 

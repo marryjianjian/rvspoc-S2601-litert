@@ -6663,7 +6663,21 @@ inline void HardSwish(const RuntimeShape& input_shape, const float* input_data,
     const float32x4_t product = vmulq_f32(in_scaled, in_reluish);
     vst1q_f32(output_data + i, product);
   }
-#endif
+#elif defined(USE_RVV)
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
+    const vfloat32m4_t input_scaled =
+        __riscv_vfmul_vf_f32m4(input, 1.0f / 6.0f, vl);
+    vfloat32m4_t reluish = __riscv_vfadd_vf_f32m4(input, 3.0f, vl);
+    reluish = __riscv_vfmax_vf_f32m4(reluish, 0.0f, vl);
+    reluish = __riscv_vfmin_vf_f32m4(reluish, 6.0f, vl);
+    const vfloat32m4_t output =
+        __riscv_vfmul_vv_f32m4(input_scaled, reluish, vl);
+    __riscv_vse32_v_f32m4(output_data + i, output, vl);
+    i += vl;
+  }
+#endif  // USE_NEON / USE_RVV
   for (; i < size; i++) {
     const float in = input_data[i];
     output_data[i] =
