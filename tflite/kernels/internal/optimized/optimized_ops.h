@@ -912,7 +912,7 @@ inline uint32x4_t RoundToNearestUnsigned(const float32x4_t input) {
 #endif  // defined(__aarch64__)
 }
 
-#endif  // USE_NEON
+#endif  // USE_NEON / USE_RVV
 
 inline void Conv(const ConvParams& params, const RuntimeShape& input_shape,
                  const float* input_data, const RuntimeShape& filter_shape,
@@ -5877,7 +5877,7 @@ inline void Quantize(const int32_t* multiplier, const int32_t* shift,
     }
   }
 
-#endif  // USE_NEON
+#endif  // USE_NEON / USE_RVV
   // Handle leftover values, one by one. This is very slow.
   for (; c < channel_size; c++) {
     for (int n = 0; n < rows; ++n) {
@@ -8061,6 +8061,19 @@ inline void PReluScalarBroadcast(int size, const ArithmeticParams& params,
     const float32x4_t result = vbslq_f32(mask, input, temp);
     vst1q_f32(output_data + i, result);
   }
+#elif defined(USE_RVV)
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
+    const vfloat32m4_t scaled =
+        __riscv_vfmul_vf_f32m4(input, alpha, vl);
+    const vbool8_t positive_mask =
+        __riscv_vmfge_vf_f32m4_b8(input, 0.0f, vl);
+    const vfloat32m4_t output =
+        __riscv_vmerge_vvm_f32m4(scaled, input, positive_mask, vl);
+    __riscv_vse32_v_f32m4(output_data + i, output, vl);
+    i += vl;
+  }
 #endif  // USE_NEON
   for (; i < size; ++i) {
     const float input = input_data[i];
@@ -8114,6 +8127,22 @@ inline void PReluElementWise(int flat_size, const ArithmeticParams& params,
     const uint32x4_t mask = vcgeq_f32(input, zero_dup);
     const float32x4_t result = vbslq_f32(mask, input, temp);
     vst1q_f32(output_data + i, result);
+  }
+#elif defined(USE_RVV)
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(flat_size - i);
+    const vfloat32m4_t input =
+        __riscv_vle32_v_f32m4(input_data + i, vl);
+    const vfloat32m4_t alpha =
+        __riscv_vle32_v_f32m4(alpha_data + i, vl);
+    const vfloat32m4_t scaled =
+        __riscv_vfmul_vv_f32m4(input, alpha, vl);
+    const vbool8_t positive_mask =
+        __riscv_vmfge_vf_f32m4_b8(input, 0.0f, vl);
+    const vfloat32m4_t output =
+        __riscv_vmerge_vvm_f32m4(scaled, input, positive_mask, vl);
+    __riscv_vse32_v_f32m4(output_data + i, output, vl);
+    i += vl;
   }
 #endif  // USE_NEON
   for (; i < flat_size; ++i) {

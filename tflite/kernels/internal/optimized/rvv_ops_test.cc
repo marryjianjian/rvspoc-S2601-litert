@@ -395,6 +395,49 @@ TEST(RvvOpsTest, FloatLeakyReluMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest,
+     FloatPReluScalarBroadcastMatchesReferenceAcrossVectorBoundaries) {
+  ArithmeticParams params;
+  constexpr float kAlpha = 0.375f;
+
+  for (int size : Float32M4VectorLengths()) {
+    const std::vector<float> input = MakeInput(size, -0.625f);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::PReluScalarBroadcast(size, params, kAlpha, input.data(),
+                                        actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = input[i] >= 0.0f ? input[i] : input[i] * kAlpha;
+    }
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest,
+     FloatPReluElementWiseMatchesReferenceAcrossVectorBoundaries) {
+  ArithmeticParams params;
+
+  for (int size : Float32M4VectorLengths()) {
+    const std::vector<float> input = MakeInput(size, -0.75f);
+    std::vector<float> alpha(size);
+    for (int i = 0; i < size; ++i) {
+      alpha[i] = static_cast<float>((i % 7) + 1) * 0.125f;
+    }
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::PReluElementWise(size, params, alpha.data(), input.data(),
+                                    actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = input[i] >= 0.0f ? input[i] : input[i] * alpha[i];
+    }
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
 TEST(RvvOpsTest, FloatHardSwishMatchesReferenceAcrossVectorBoundaries) {
   for (int size : Float32M4VectorLengths()) {
     const RuntimeShape shape({size});
