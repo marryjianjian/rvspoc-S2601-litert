@@ -819,6 +819,7 @@ cc_library(
         ":common",
         ":compatibility",
         ":cppmath",
+        ":cpu_check",
         "@gemmlowp//:fixedpoint",
     ],
 )
@@ -1356,6 +1357,7 @@ cc_test(
     deps = [
         ":common",
         ":optimized_base",
+        ":portable_tensor_utils",
         "@com_google_googletest//:gtest_main",
     ],
 )

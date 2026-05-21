@@ -15,6 +15,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -40,6 +41,7 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/integer_ops/mul.h"
 #include "tflite/kernels/internal/reference/integer_ops/pooling.h"
 #include "tflite/kernels/internal/reference/mul.h"
+#include "tflite/kernels/internal/reference/portable_tensor_utils.h"
 #include "tflite/kernels/internal/reference/quantize.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/reference/requantize.h"
@@ -1728,6 +1730,208 @@ TEST(RvvOpsTest, Int16SubElementwiseMatchesReferenceAcrossVectorBoundaries) {
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
   }
 }
+
+void ReferenceLstmCwiseMulInt16(const int16_t* input1, const int16_t* input2,
+                                int n_batch, int n_input, int shift,
+                                int16_t* output) {
+  for (int batch = 0; batch < n_batch; ++batch) {
+    for (int i = 0; i < n_input; ++i) {
+      const int index = batch * n_input + i;
+      const int32_t value =
+          static_cast<int32_t>(input1[index]) * input2[index];
+      output[index] =
+          static_cast<int16_t>(gemmlowp::RoundingDivideByPOT(value, shift));
+    }
+  }
+}
+
+void ReferenceLstmCwiseMulInt16ToInt8(const int16_t* input1,
+                                      const int16_t* input2,
+                                      int32_t multiplier, int32_t shift,
+                                      int32_t n_batch, int32_t n_input,
+                                      int32_t output_zp, int8_t* output) {
+  for (int batch = 0; batch < n_batch; ++batch) {
+    for (int i = 0; i < n_input; ++i) {
+      const int index = batch * n_input + i;
+      int32_t value = static_cast<int32_t>(input1[index]) * input2[index];
+      value = MultiplyByQuantizedMultiplier(value, multiplier, shift);
+      value += output_zp;
+      value = std::min(std::max(value, -128), 127);
+      output[index] = static_cast<int8_t>(value);
+    }
+  }
+}
+
+void ReferenceLstmCwiseAddInt16(const int16_t* input1, const int16_t* input2,
+                                int n_batch, int n_input, int16_t* output) {
+  for (int batch = 0; batch < n_batch; ++batch) {
+    for (int i = 0; i < n_input; ++i) {
+      const int index = batch * n_input + i;
+      int32_t sum = input1[index] + input2[index];
+      sum = std::min(std::max(sum, static_cast<int32_t>(-32768)),
+                     static_cast<int32_t>(32767));
+      output[index] = static_cast<int16_t>(sum);
+    }
+  }
+}
+
+void ReferenceLstmVectorBatchVectorCwiseProductAccumulate(
+    const int16_t* vector, int v_size, const int16_t* batch_vector,
+    int n_batch, int32_t multiplier, int shift, int16_t* result) {
+  for (int batch = 0; batch < n_batch; ++batch) {
+    for (int i = 0; i < v_size; ++i) {
+      const int index = batch * v_size + i;
+      int32_t product = vector[i] * batch_vector[index];
+      product = MultiplyByQuantizedMultiplier(product, multiplier, shift);
+      int32_t output = product + result[index];
+      output = std::min(std::max(output, static_cast<int32_t>(-32768)),
+                        static_cast<int32_t>(32767));
+      result[index] = static_cast<int16_t>(output);
+    }
+  }
+}
+
+TEST(RvvOpsTest, LstmCwiseMulInt16MatchesPortableAcrossVectorBoundaries) {
+  for (int size : Int16M2VectorLengths()) {
+    constexpr int kBatch = 3;
+    const int n_input = size;
+    const std::vector<int16_t> input1 = MakeInt16Input(kBatch * n_input, 211);
+    const std::vector<int16_t> input2 = MakeInt16Input(kBatch * n_input, 907);
+    std::vector<int16_t> actual(kBatch * n_input);
+    std::vector<int16_t> expected(kBatch * n_input);
+
+    tensor_utils::CwiseMul(input1.data(), input2.data(), kBatch, n_input, 15,
+                           actual.data());
+    ReferenceLstmCwiseMulInt16(input1.data(), input2.data(), kBatch, n_input,
+                               15, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, LstmCwiseAddInt16MatchesPortableAcrossVectorBoundaries) {
+  for (int size : Int16M2VectorLengths()) {
+    constexpr int kBatch = 2;
+    const int n_input = size;
+    std::vector<int16_t> input1 = MakeInt16Input(kBatch * n_input, 1231);
+    std::vector<int16_t> input2 = MakeInt16Input(kBatch * n_input, 4567);
+    if (kBatch * n_input >= 4) {
+      input1[0] = std::numeric_limits<int16_t>::max();
+      input2[0] = 1;
+      input1[1] = std::numeric_limits<int16_t>::min();
+      input2[1] = -1;
+    }
+    std::vector<int16_t> actual(kBatch * n_input);
+    std::vector<int16_t> expected(kBatch * n_input);
+
+    tensor_utils::CwiseAdd(input1.data(), input2.data(), kBatch, n_input,
+                           actual.data());
+    ReferenceLstmCwiseAddInt16(input1.data(), input2.data(), kBatch, n_input,
+                               expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, LstmCwiseClippingMatchesPortableAcrossVectorBoundaries) {
+  for (int size : Int16M2VectorLengths()) {
+    std::vector<float> actual_float = MakeInput(size, 0.25f);
+    std::vector<float> expected_float = actual_float;
+    tensor_utils::CwiseClipping(actual_float.data(), size, 2.5f);
+    for (float& value : expected_float) {
+      value = std::max(std::min(2.5f, value), -2.5f);
+    }
+    EXPECT_THAT(actual_float, Pointwise(FloatNear(1e-6f), expected_float))
+        << "float size=" << size;
+
+    std::vector<int16_t> actual_i16 = MakeInt16Input(size, 3109);
+    std::vector<int16_t> expected_i16 = actual_i16;
+    tensor_utils::CwiseClipping(actual_i16.data(), size,
+                                static_cast<int16_t>(4096));
+    for (int16_t& value : expected_i16) {
+      value = std::max(std::min(static_cast<int16_t>(4096), value),
+                       static_cast<int16_t>(-4096));
+    }
+    EXPECT_THAT(actual_i16, ElementsAreArray(expected_i16))
+        << "int16 size=" << size;
+
+    std::vector<int8_t> actual_i8 = MakeInt8Input(size, 71);
+    std::vector<int8_t> expected_i8 = actual_i8;
+    tensor_utils::CwiseClipping(actual_i8.data(), size,
+                                static_cast<int8_t>(64));
+    for (int8_t& value : expected_i8) {
+      value = std::max(std::min(static_cast<int8_t>(64), value),
+                       static_cast<int8_t>(-64));
+    }
+    EXPECT_THAT(actual_i8, ElementsAreArray(expected_i8))
+        << "int8 size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, LstmSub1VectorMatchesPortableAcrossVectorBoundaries) {
+  for (int size : Int16M2VectorLengths()) {
+    const std::vector<float> input_float = MakeInput(size, -0.5f);
+    std::vector<float> actual_float(size);
+    std::vector<float> expected_float(size);
+    tensor_utils::Sub1Vector(input_float.data(), size, actual_float.data());
+    for (int i = 0; i < size; ++i) {
+      expected_float[i] = 1.0f - input_float[i];
+    }
+    EXPECT_THAT(actual_float, Pointwise(FloatNear(1e-6f), expected_float))
+        << "float size=" << size;
+
+    const std::vector<int16_t> input_i16 = MakeInt16Input(size, 1777);
+    std::vector<int16_t> actual_i16(size);
+    std::vector<int16_t> expected_i16(size);
+    tensor_utils::Sub1Vector(input_i16.data(), size, actual_i16.data());
+    for (int i = 0; i < size; ++i) {
+      expected_i16[i] = static_cast<int16_t>(32767 - input_i16[i]);
+    }
+    EXPECT_THAT(actual_i16, ElementsAreArray(expected_i16))
+        << "int16 size=" << size;
+  }
+}
+
+#if !TFLITE_SINGLE_ROUNDING
+TEST(RvvOpsTest, LstmCwiseMulInt16ToInt8MatchesPortableAcrossVectorBoundaries) {
+  for (int size : Int16M2VectorLengths()) {
+    constexpr int kBatch = 3;
+    const int n_input = size;
+    const std::vector<int16_t> input1 = MakeInt16Input(kBatch * n_input, 1201);
+    const std::vector<int16_t> input2 = MakeInt16Input(kBatch * n_input, 431);
+    std::vector<int8_t> actual(kBatch * n_input);
+    std::vector<int8_t> expected(kBatch * n_input);
+
+    tensor_utils::CwiseMul(input1.data(), input2.data(), 1073741824, -7,
+                           kBatch, n_input, -5, actual.data());
+    ReferenceLstmCwiseMulInt16ToInt8(input1.data(), input2.data(), 1073741824,
+                                     -7, kBatch, n_input, -5,
+                                     expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest,
+     LstmVectorBatchVectorCwiseProductAccumulateMatchesPortableAcrossVectorBoundaries) {
+  for (int size : Int16M2VectorLengths()) {
+    constexpr int kBatch = 3;
+    const std::vector<int16_t> vector = MakeInt16Input(size, 701);
+    const std::vector<int16_t> batch_vector = MakeInt16Input(kBatch * size, 53);
+    std::vector<int16_t> actual = MakeInt16Input(kBatch * size, 2909);
+    std::vector<int16_t> expected = actual;
+
+    tensor_utils::VectorBatchVectorCwiseProductAccumulate(
+        vector.data(), size, batch_vector.data(), kBatch, 1073741824, -8,
+        actual.data());
+    ReferenceLstmVectorBatchVectorCwiseProductAccumulate(
+        vector.data(), size, batch_vector.data(), kBatch, 1073741824, -8,
+        expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+#endif  // !TFLITE_SINGLE_ROUNDING
 
 #endif  // USE_RVV
 

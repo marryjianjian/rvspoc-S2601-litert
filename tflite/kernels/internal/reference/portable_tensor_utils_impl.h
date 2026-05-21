@@ -16,7 +16,11 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_PORTABLE_TENSOR_UTILS_IMPL_H_
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <type_traits>
+
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 
 #if defined(_MSC_VER)
 #define __restrict__ __restrict
@@ -188,6 +192,42 @@ void PortableCwiseAdd(const int16_t* input_1, const int16_t* input_2,
 template <typename T>
 void PortableCwiseClipping(T* vector, const int v_size,
                            const T& clipping_value) {
+#if defined(USE_RVV)
+  if constexpr (std::is_same<T, float>::value) {
+    const float min_value = -clipping_value;
+    for (int i = 0; i < v_size;) {
+      const size_t vl = __riscv_vsetvl_e32m4(v_size - i);
+      vfloat32m4_t values = __riscv_vle32_v_f32m4(vector + i, vl);
+      values = __riscv_vfmax_vf_f32m4(values, min_value, vl);
+      values = __riscv_vfmin_vf_f32m4(values, clipping_value, vl);
+      __riscv_vse32_v_f32m4(vector + i, values, vl);
+      i += vl;
+    }
+    return;
+  } else if constexpr (std::is_same<T, int16_t>::value) {
+    const int16_t min_value = -clipping_value;
+    for (int i = 0; i < v_size;) {
+      const size_t vl = __riscv_vsetvl_e16m2(v_size - i);
+      vint16m2_t values = __riscv_vle16_v_i16m2(vector + i, vl);
+      values = __riscv_vmax_vx_i16m2(values, min_value, vl);
+      values = __riscv_vmin_vx_i16m2(values, clipping_value, vl);
+      __riscv_vse16_v_i16m2(vector + i, values, vl);
+      i += vl;
+    }
+    return;
+  } else if constexpr (std::is_same<T, int8_t>::value) {
+    const int8_t min_value = -clipping_value;
+    for (int i = 0; i < v_size;) {
+      const size_t vl = __riscv_vsetvl_e8m1(v_size - i);
+      vint8m1_t values = __riscv_vle8_v_i8m1(vector + i, vl);
+      values = __riscv_vmax_vx_i8m1(values, min_value, vl);
+      values = __riscv_vmin_vx_i8m1(values, clipping_value, vl);
+      __riscv_vse8_v_i8m1(vector + i, values, vl);
+      i += vl;
+    }
+    return;
+  }
+#endif
   for (int i = 0; i < v_size; i++) {
     vector[i] = std::max(std::min(clipping_value, vector[i]),
                          static_cast<T>(-clipping_value));

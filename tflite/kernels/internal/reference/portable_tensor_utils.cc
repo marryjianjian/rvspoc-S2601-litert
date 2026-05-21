@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -23,6 +24,7 @@ limitations under the License.
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/compatibility.h"
 #include "tflite/kernels/internal/cppmath.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/reference/portable_tensor_utils_impl.h"
 
 #if defined(_MSC_VER)
@@ -35,6 +37,172 @@ namespace tensor_utils {
 namespace {
 const int32_t kInt16Max = std::numeric_limits<int16_t>::max();
 const int32_t kInt16Min = std::numeric_limits<int16_t>::min();
+
+#if defined(USE_RVV)
+vint32m4_t RvvRoundingDivideByPOT(vint32m4_t x, int exponent, size_t vl) {
+  const int32_t mask = (1ll << exponent) - 1;
+  const int32_t threshold_base = mask >> 1;
+
+  const vint32m4_t remainder = __riscv_vand_vx_i32m4(x, mask, vl);
+  const vbool8_t negative_mask = __riscv_vmslt_vx_i32m4_b8(x, 0, vl);
+  const vint32m4_t threshold_non_negative =
+      __riscv_vmv_v_x_i32m4(threshold_base, vl);
+  const vint32m4_t threshold_negative =
+      __riscv_vmv_v_x_i32m4(threshold_base + 1, vl);
+  const vint32m4_t threshold = __riscv_vmerge_vvm_i32m4(
+      threshold_non_negative, threshold_negative, negative_mask, vl);
+
+  const vint32m4_t shifted = __riscv_vsra_vx_i32m4(x, exponent, vl);
+  const vint32m4_t rounded_up = __riscv_vadd_vx_i32m4(shifted, 1, vl);
+  const vbool8_t round_up_mask =
+      __riscv_vmsgt_vv_i32m4_b8(remainder, threshold, vl);
+  return __riscv_vmerge_vvm_i32m4(shifted, rounded_up, round_up_mask, vl);
+}
+
+void RvvCwiseMulInt16(const int16_t* input_1, const int16_t* input_2,
+                      int size, int shift, int16_t* output) {
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e16m2(size - i);
+    const vint16m2_t input1 = __riscv_vle16_v_i16m2(input_1 + i, vl);
+    const vint16m2_t input2 = __riscv_vle16_v_i16m2(input_2 + i, vl);
+    vint32m4_t product = __riscv_vwmul_vv_i32m4(input1, input2, vl);
+    product = RvvRoundingDivideByPOT(product, shift, vl);
+    const vint16m2_t result = __riscv_vnsra_wx_i16m2(product, 0, vl);
+    __riscv_vse16_v_i16m2(output + i, result, vl);
+    i += vl;
+  }
+}
+
+void RvvCwiseAddInt16(const int16_t* input_1, const int16_t* input_2, int size,
+                      int16_t* output) {
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e16m2(size - i);
+    const vint16m2_t input1 = __riscv_vle16_v_i16m2(input_1 + i, vl);
+    const vint16m2_t input2 = __riscv_vle16_v_i16m2(input_2 + i, vl);
+    vint32m4_t sum = __riscv_vadd_vv_i32m4(
+        __riscv_vsext_vf2_i32m4(input1, vl),
+        __riscv_vsext_vf2_i32m4(input2, vl), vl);
+    sum = __riscv_vmax_vx_i32m4(sum, kInt16Min, vl);
+    sum = __riscv_vmin_vx_i32m4(sum, kInt16Max, vl);
+    const vint16m2_t result = __riscv_vnsra_wx_i16m2(sum, 0, vl);
+    __riscv_vse16_v_i16m2(output + i, result, vl);
+    i += vl;
+  }
+}
+
+void RvvSub1VectorFloat(const float* vector, int v_size, float* result) {
+  for (int i = 0; i < v_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(v_size - i);
+    const vfloat32m4_t values = __riscv_vle32_v_f32m4(vector + i, vl);
+    const vfloat32m4_t output = __riscv_vfrsub_vf_f32m4(values, 1.0f, vl);
+    __riscv_vse32_v_f32m4(result + i, output, vl);
+    i += vl;
+  }
+}
+
+void RvvSub1VectorInt16(const int16_t* vector, int v_size, int16_t* result) {
+  for (int i = 0; i < v_size;) {
+    const size_t vl = __riscv_vsetvl_e16m2(v_size - i);
+    const vint16m2_t values = __riscv_vle16_v_i16m2(vector + i, vl);
+    const vint16m2_t output = __riscv_vrsub_vx_i16m2(values, 32767, vl);
+    __riscv_vse16_v_i16m2(result + i, output, vl);
+    i += vl;
+  }
+}
+
+#if !TFLITE_SINGLE_ROUNDING
+vint32m4_t RvvSaturatingRoundingDoublingHighMul(vint32m4_t x,
+                                                int32_t multiplier,
+                                                size_t vl) {
+  vint64m8_t product = __riscv_vwmul_vx_i64m8(x, multiplier, vl);
+  const vbool8_t negative_product_mask =
+      __riscv_vmslt_vx_i64m8_b8(product, 0, vl);
+  const vint64m8_t positive_nudge = __riscv_vmv_v_x_i64m8(1ll << 30, vl);
+  const vint64m8_t negative_nudge = __riscv_vmv_v_x_i64m8(1 - (1ll << 30), vl);
+  const vint64m8_t nudge = __riscv_vmerge_vvm_i64m8(
+      positive_nudge, negative_nudge, negative_product_mask, vl);
+  product = __riscv_vadd_vv_i64m8(product, nudge, vl);
+
+  vint64m8_t quotient = __riscv_vsra_vx_i64m8(product, 31, vl);
+  const vint64m8_t remainder =
+      __riscv_vand_vx_i64m8(product, (1ll << 31) - 1, vl);
+  const vbool8_t negative_quotient_mask =
+      __riscv_vmslt_vx_i64m8_b8(product, 0, vl);
+  const vbool8_t non_zero_remainder_mask =
+      __riscv_vmsne_vx_i64m8_b8(remainder, 0, vl);
+  const vbool8_t correction_mask =
+      __riscv_vmand_mm_b8(negative_quotient_mask, non_zero_remainder_mask, vl);
+  const vint64m8_t corrected_quotient = __riscv_vadd_vx_i64m8(quotient, 1, vl);
+  quotient = __riscv_vmerge_vvm_i64m8(quotient, corrected_quotient,
+                                      correction_mask, vl);
+
+  vint32m4_t result = __riscv_vnsra_wx_i32m4(quotient, 0, vl);
+  if (multiplier == std::numeric_limits<int32_t>::min()) {
+    const vbool8_t overflow_mask =
+        __riscv_vmseq_vx_i32m4_b8(x, std::numeric_limits<int32_t>::min(), vl);
+    const vint32m4_t saturated =
+        __riscv_vmv_v_x_i32m4(std::numeric_limits<int32_t>::max(), vl);
+    result = __riscv_vmerge_vvm_i32m4(result, saturated, overflow_mask, vl);
+  }
+  return result;
+}
+
+vint32m4_t RvvMultiplyByQuantizedMultiplier(vint32m4_t x, int32_t multiplier,
+                                            int shift, size_t vl) {
+  const int left_shift = std::max(shift, 0);
+  const int right_shift = std::max(-shift, 0);
+  x = __riscv_vsll_vx_i32m4(x, left_shift, vl);
+  return RvvRoundingDivideByPOT(
+      RvvSaturatingRoundingDoublingHighMul(x, multiplier, vl), right_shift,
+      vl);
+}
+
+void RvvCwiseMulInt16ToInt8(const int16_t* input_1, const int16_t* input_2,
+                            int32_t multiplier, int shift, int size,
+                            int32_t output_zp, int8_t* output) {
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e16m2(size - i);
+    const vint16m2_t input1 = __riscv_vle16_v_i16m2(input_1 + i, vl);
+    const vint16m2_t input2 = __riscv_vle16_v_i16m2(input_2 + i, vl);
+    vint32m4_t result = __riscv_vwmul_vv_i32m4(input1, input2, vl);
+    result = RvvMultiplyByQuantizedMultiplier(result, multiplier, shift, vl);
+    result = __riscv_vadd_vx_i32m4(result, output_zp, vl);
+    result = __riscv_vmax_vx_i32m4(result, -128, vl);
+    result = __riscv_vmin_vx_i32m4(result, 127, vl);
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(result, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(output + i, narrowed_i8, vl);
+    i += vl;
+  }
+}
+
+void RvvVectorBatchVectorCwiseProductAccumulate(
+    const int16_t* vector, int v_size, const int16_t* batch_vector,
+    int n_batch, int32_t multiplier, int shift, int16_t* result) {
+  for (int batch = 0; batch < n_batch; ++batch) {
+    const int base = batch * v_size;
+    for (int i = 0; i < v_size;) {
+      const size_t vl = __riscv_vsetvl_e16m2(v_size - i);
+      const vint16m2_t vector_values = __riscv_vle16_v_i16m2(vector + i, vl);
+      const vint16m2_t batch_values =
+          __riscv_vle16_v_i16m2(batch_vector + base + i, vl);
+      vint32m4_t product =
+          __riscv_vwmul_vv_i32m4(vector_values, batch_values, vl);
+      product = RvvMultiplyByQuantizedMultiplier(product, multiplier, shift,
+                                                 vl);
+      const vint16m2_t current = __riscv_vle16_v_i16m2(result + base + i, vl);
+      vint32m4_t output = __riscv_vadd_vv_i32m4(
+          product, __riscv_vsext_vf2_i32m4(current, vl), vl);
+      output = __riscv_vmax_vx_i32m4(output, kInt16Min, vl);
+      output = __riscv_vmin_vx_i32m4(output, kInt16Max, vl);
+      const vint16m2_t narrowed = __riscv_vnsra_wx_i16m2(output, 0, vl);
+      __riscv_vse16_v_i16m2(result + base + i, narrowed, vl);
+      i += vl;
+    }
+  }
+}
+#endif  // !TFLITE_SINGLE_ROUNDING
+#endif  // defined(USE_RVV)
 }  // namespace
 
 // LINT.IfChange(portable_symmetric_quantize_floats)
@@ -651,6 +819,10 @@ void PortableApplyTanhFloat(const int16_t* input, int32_t n_batch,
 
 void PortableCwiseMul(const int16_t* input_1, const int16_t* input_2,
                       int n_batch, int n_input, int shift, int16_t* output) {
+#if defined(USE_RVV)
+  RvvCwiseMulInt16(input_1, input_2, n_batch * n_input, shift, output);
+  return;
+#endif
   for (int batch = 0; batch < n_batch; ++batch) {
     for (int i = 0; i < n_input; ++i) {
       const int index = batch * n_input + i;
@@ -666,6 +838,11 @@ void PortableCwiseMul(const int16_t* input_1, const int16_t* input_2,
 void PortableCwiseMul(const int16_t* input_1, const int16_t* input_2,
                       int32_t multiplier, int32_t shift, int32_t n_batch,
                       int32_t n_input, int32_t output_zp, int8_t* output) {
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  RvvCwiseMulInt16ToInt8(input_1, input_2, multiplier, shift,
+                         n_batch * n_input, output_zp, output);
+  return;
+#endif
   for (int batch = 0; batch < n_batch; ++batch) {
     for (int i = 0; i < n_input; ++i) {
       const int index = batch * n_input + i;
@@ -684,6 +861,10 @@ void PortableCwiseMul(const int16_t* input_1, const int16_t* input_2,
 
 void PortableCwiseAdd(const int16_t* input_1, const int16_t* input_2,
                       int n_batch, int n_input, int16_t* output) {
+#if defined(USE_RVV)
+  RvvCwiseAddInt16(input_1, input_2, n_batch * n_input, output);
+  return;
+#endif
   for (int batch = 0; batch < n_batch; ++batch) {
     for (int i = 0; i < n_input; ++i) {
       const int index = batch * n_input + i;
@@ -728,6 +909,11 @@ void PortableBatchVectorBatchVectorDotProduct(const int16_t* vector1,
 void PortableVectorBatchVectorCwiseProductAccumulate(
     const int16_t* vector, int v_size, const int16_t* batch_vector, int n_batch,
     int32_t multiplier, int shift, int16_t* result) {
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  RvvVectorBatchVectorCwiseProductAccumulate(
+      vector, v_size, batch_vector, n_batch, multiplier, shift, result);
+  return;
+#endif
   for (int b = 0; b < n_batch; b++) {
     for (int v = 0; v < v_size; v++) {
       int32_t prod = vector[v] * *batch_vector++;
@@ -741,12 +927,20 @@ void PortableVectorBatchVectorCwiseProductAccumulate(
 }
 
 void PortableSub1Vector(const float* vector, int v_size, float* result) {
+#if defined(USE_RVV)
+  RvvSub1VectorFloat(vector, v_size, result);
+  return;
+#endif
   for (int v = 0; v < v_size; v++) {
     *result++ = 1.0f - *vector++;
   }
 }
 
 void PortableSub1Vector(const int16_t* vector, int v_size, int16_t* result) {
+#if defined(USE_RVV)
+  RvvSub1VectorInt16(vector, v_size, result);
+  return;
+#endif
   static const int16_t kOne = 32767;
   for (int v = 0; v < v_size; v++) {
     *result++ = kOne - *vector++;
