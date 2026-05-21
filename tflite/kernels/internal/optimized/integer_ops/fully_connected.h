@@ -15,17 +15,131 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_FULLY_CONNECTED_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_FULLY_CONNECTED_H_
 
+#include <type_traits>
+
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/kernels/cpu_backend_context.h"
 #include "tflite/kernels/cpu_backend_gemm.h"
 #include "tflite/kernels/cpu_backend_gemm_params.h"
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/compatibility.h"
+#include "tflite/kernels/internal/optimized/rvv_ops.h"
 #include "tflite/kernels/internal/reference/integer_ops/fully_connected.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {
 namespace optimized_integer_ops {
+
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+inline int32_t RvvDotProductInt8(const int8_t* lhs, const int8_t* rhs,
+                                 int size, int32_t lhs_offset,
+                                 int32_t rhs_offset) {
+  int32_t acc = 0;
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vint8m1_t lhs_i8 = __riscv_vle8_v_i8m1(lhs + i, vl);
+    const vint8m1_t rhs_i8 = __riscv_vle8_v_i8m1(rhs + i, vl);
+    vint16m2_t lhs_i16 = __riscv_vsext_vf2_i16m2(lhs_i8, vl);
+    vint16m2_t rhs_i16 = __riscv_vsext_vf2_i16m2(rhs_i8, vl);
+    lhs_i16 = __riscv_vadd_vx_i16m2(lhs_i16, lhs_offset, vl);
+    rhs_i16 = __riscv_vadd_vx_i16m2(rhs_i16, rhs_offset, vl);
+    const vint32m4_t product = __riscv_vwmul_vv_i32m4(lhs_i16, rhs_i16, vl);
+    vint32m1_t reduced = __riscv_vmv_v_x_i32m1(acc, 1);
+    reduced = __riscv_vredsum_vs_i32m4_i32m1(product, reduced, vl);
+    acc = __riscv_vmv_x_s_i32m1_i32(reduced);
+    i += vl;
+  }
+  return acc;
+}
+
+template <typename DstScalar>
+inline bool RvvFullyConnectedPerChannelInt8(
+    const FullyConnectedParams& params, const int32_t* output_multiplier,
+    const int* output_shift, const RuntimeShape& input_shape,
+    const int8_t* input_data, const RuntimeShape& filter_shape,
+    const int8_t* filter_data, const RuntimeShape& bias_shape,
+    const int32_t* bias_data, const RuntimeShape& output_shape,
+    DstScalar* output_data) {
+  if constexpr (!std::is_same<DstScalar, int8_t>::value) {
+    return false;
+  }
+  TFLITE_DCHECK_GE(filter_shape.DimensionsCount(), 2);
+  TFLITE_DCHECK_GE(output_shape.DimensionsCount(), 1);
+  const int output_dim_count = output_shape.DimensionsCount();
+  const int filter_dim_count = filter_shape.DimensionsCount();
+  const int batches = FlatSizeSkipDim(output_shape, output_dim_count - 1);
+  const int filter_rows = filter_shape.Dims(filter_dim_count - 2);
+  const int filter_cols = filter_shape.Dims(filter_dim_count - 1);
+  const int output_rows = output_shape.Dims(output_dim_count - 1);
+  TFLITE_DCHECK_EQ(output_rows, filter_rows);
+  if (bias_data) {
+    TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_rows);
+  }
+
+  for (int b = 0; b < batches; ++b) {
+    const int8_t* input_row = input_data + b * filter_cols;
+    for (int out_c = 0; out_c < output_rows; ++out_c) {
+      const int8_t* filter_row = filter_data + out_c * filter_cols;
+      int32_t acc = RvvDotProductInt8(filter_row, input_row, filter_cols,
+                                      /*lhs_offset=*/0, params.input_offset);
+      if (bias_data) {
+        acc += bias_data[out_c];
+      }
+      acc = MultiplyByQuantizedMultiplier(acc, output_multiplier[out_c],
+                                          output_shift[out_c]);
+      acc += params.output_offset;
+      acc = std::max(acc, params.quantized_activation_min);
+      acc = std::min(acc, params.quantized_activation_max);
+      output_data[out_c + output_rows * b] = static_cast<DstScalar>(acc);
+    }
+  }
+  return true;
+}
+
+template <typename DstScalar>
+inline bool RvvFullyConnectedInt8(
+    const FullyConnectedParams& params, const RuntimeShape& input_shape,
+    const int8_t* input_data, const RuntimeShape& filter_shape,
+    const int8_t* filter_data, const RuntimeShape& bias_shape,
+    const int32_t* bias_data, const RuntimeShape& output_shape,
+    DstScalar* output_data) {
+  if constexpr (!std::is_same<DstScalar, int8_t>::value) {
+    return false;
+  }
+  TFLITE_DCHECK_GE(filter_shape.DimensionsCount(), 2);
+  TFLITE_DCHECK_GE(output_shape.DimensionsCount(), 1);
+  const int output_dim_count = output_shape.DimensionsCount();
+  const int filter_dim_count = filter_shape.DimensionsCount();
+  const int batches = FlatSizeSkipDim(output_shape, output_dim_count - 1);
+  const int filter_rows = filter_shape.Dims(filter_dim_count - 2);
+  const int filter_cols = filter_shape.Dims(filter_dim_count - 1);
+  const int output_rows = output_shape.Dims(output_dim_count - 1);
+  TFLITE_DCHECK_EQ(output_rows, filter_rows);
+  if (bias_data) {
+    TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_rows);
+  }
+
+  for (int b = 0; b < batches; ++b) {
+    const int8_t* input_row = input_data + b * filter_cols;
+    for (int out_c = 0; out_c < output_rows; ++out_c) {
+      const int8_t* filter_row = filter_data + out_c * filter_cols;
+      int32_t acc =
+          RvvDotProductInt8(filter_row, input_row, filter_cols,
+                            params.weights_offset, params.input_offset);
+      if (bias_data) {
+        acc += bias_data[out_c];
+      }
+      acc = MultiplyByQuantizedMultiplier(acc, params.output_multiplier,
+                                          params.output_shift);
+      acc += params.output_offset;
+      acc = std::max(acc, params.quantized_activation_min);
+      acc = std::min(acc, params.quantized_activation_max);
+      output_data[out_c + output_rows * b] = static_cast<DstScalar>(acc);
+    }
+  }
+  return true;
+}
+#endif  // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
 
 template <typename InputScalar, typename DstScalar>
 inline void FullyConnectedPerChannel(
@@ -59,6 +173,17 @@ inline void FullyConnectedPerChannel(
   if (bias_data) {
     TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_rows);
   }
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  if constexpr (std::is_same<InputScalar, int8_t>::value) {
+    if (RvvFullyConnectedPerChannelInt8(
+            params, output_multiplier, output_shift, input_shape, input_data,
+            filter_shape, filter_data, bias_shape, bias_data, output_shape,
+            output_data)) {
+      return;
+    }
+  }
+#endif  // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+
   const bool use_caching =
       (cpu_backend_context != nullptr) && cpu_backend_context->use_caching();
 
@@ -131,6 +256,16 @@ inline void FullyConnected(
   if (bias_data) {
     TFLITE_DCHECK_EQ(bias_shape.FlatSize(), output_rows);
   }
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  if constexpr (std::is_same<InputScalar, int8_t>::value) {
+    if (RvvFullyConnectedInt8(params, input_shape, input_data, filter_shape,
+                              filter_data, bias_shape, bias_data, output_shape,
+                              output_data)) {
+      return;
+    }
+  }
+#endif  // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+
   const bool use_caching =
       (cpu_backend_context != nullptr) && cpu_backend_context->use_caching();
 

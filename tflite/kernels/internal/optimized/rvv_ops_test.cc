@@ -21,6 +21,8 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/integer_ops/add.h"
+#include "tflite/kernels/internal/optimized/integer_ops/conv.h"
+#include "tflite/kernels/internal/optimized/integer_ops/fully_connected.h"
 #include "tflite/kernels/internal/optimized/integer_ops/leaky_relu.h"
 #include "tflite/kernels/internal/optimized/integer_ops/mul.h"
 #include "tflite/kernels/internal/optimized/integer_ops/pooling.h"
@@ -31,6 +33,8 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/add.h"
 #include "tflite/kernels/internal/reference/div.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
+#include "tflite/kernels/internal/reference/integer_ops/conv.h"
+#include "tflite/kernels/internal/reference/integer_ops/fully_connected.h"
 #include "tflite/kernels/internal/reference/integer_ops/mul.h"
 #include "tflite/kernels/internal/reference/integer_ops/pooling.h"
 #include "tflite/kernels/internal/reference/mul.h"
@@ -228,6 +232,42 @@ LeakyReluParams MakeInt16LeakyReluParams() {
   params.output_shift_alpha = -2;
   params.output_multiplier_identity = 1073741824;
   params.output_shift_identity = 1;
+  return params;
+}
+
+FullyConnectedParams MakeInt8FullyConnectedParams() {
+  FullyConnectedParams params;
+  params.input_offset = 9;
+  params.weights_offset = -5;
+  params.output_offset = -7;
+  params.output_multiplier = 1234567890;
+  params.output_shift = -8;
+  params.quantized_activation_min = -101;
+  params.quantized_activation_max = 97;
+  return params;
+}
+
+FullyConnectedParams MakeInt8FullyConnectedPerChannelParams() {
+  FullyConnectedParams params;
+  params.input_offset = -11;
+  params.output_offset = 13;
+  params.quantized_activation_min = -95;
+  params.quantized_activation_max = 99;
+  return params;
+}
+
+ConvParams MakeInt8ConvPerChannelParams() {
+  ConvParams params;
+  params.input_offset = 7;
+  params.output_offset = -9;
+  params.stride_height = 1;
+  params.stride_width = 1;
+  params.dilation_height_factor = 1;
+  params.dilation_width_factor = 1;
+  params.padding_values.height = 0;
+  params.padding_values.width = 0;
+  params.quantized_activation_min = -103;
+  params.quantized_activation_max = 101;
   return params;
 }
 
@@ -533,6 +573,129 @@ TEST(RvvOpsTest, RequantizeInt32ToInt16MatchesReferenceAcrossVectorBoundaries) {
                               expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, Int8FullyConnectedMatchesReferenceAcrossVectorBoundaries) {
+  const FullyConnectedParams params = MakeInt8FullyConnectedParams();
+  constexpr int kBatches = 3;
+  constexpr int kOutputDepth = 7;
+  const RuntimeShape bias_shape({kOutputDepth});
+  const std::vector<int32_t> bias = MakeInt32Input(kOutputDepth, 41);
+
+  for (int accum_depth : Int8M1VectorLengths()) {
+    if (accum_depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({kBatches, accum_depth});
+    const RuntimeShape filter_shape({kOutputDepth, accum_depth});
+    const RuntimeShape output_shape({kBatches, kOutputDepth});
+    const std::vector<int8_t> input =
+        MakeInt8Input(input_shape.FlatSize(), 19);
+    const std::vector<int8_t> filter =
+        MakeInt8Input(filter_shape.FlatSize(), 83);
+    std::vector<int8_t> actual(output_shape.FlatSize());
+    std::vector<int8_t> expected(output_shape.FlatSize());
+
+    optimized_integer_ops::FullyConnected(
+        params, input_shape, input.data(), filter_shape, filter.data(),
+        bias_shape, bias.data(), output_shape, actual.data(), nullptr);
+    reference_integer_ops::FullyConnected(
+        params, input_shape, input.data(), filter_shape, filter.data(),
+        bias_shape, bias.data(), output_shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected))
+        << "accum_depth=" << accum_depth;
+  }
+}
+
+TEST(RvvOpsTest,
+     Int8FullyConnectedPerChannelMatchesReferenceAcrossVectorBoundaries) {
+  const FullyConnectedParams params = MakeInt8FullyConnectedPerChannelParams();
+  constexpr int kBatches = 2;
+  constexpr int kOutputDepth = 5;
+  const RuntimeShape bias_shape({kOutputDepth});
+  const std::vector<int32_t> bias = MakeInt32Input(kOutputDepth, 157);
+  const int32_t output_multiplier[kOutputDepth] = {
+      1073741824, 1234567890, 1342177280, 987654321, 1503238554};
+  const int output_shift[kOutputDepth] = {-4, -3, -5, -2, -6};
+
+  for (int accum_depth : Int8M1VectorLengths()) {
+    if (accum_depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({kBatches, accum_depth});
+    const RuntimeShape filter_shape({kOutputDepth, accum_depth});
+    const RuntimeShape output_shape({kBatches, kOutputDepth});
+    const std::vector<int8_t> input =
+        MakeInt8Input(input_shape.FlatSize(), 61);
+    const std::vector<int8_t> filter =
+        MakeInt8Input(filter_shape.FlatSize(), 131);
+    std::vector<int8_t> actual(output_shape.FlatSize());
+    std::vector<int8_t> expected(output_shape.FlatSize());
+
+    optimized_integer_ops::FullyConnectedPerChannel(
+        params, output_multiplier, output_shift, input_shape, input.data(),
+        filter_shape, filter.data(), bias_shape, bias.data(), output_shape,
+        actual.data(), nullptr);
+    reference_integer_ops::FullyConnectedPerChannel(
+        params, output_multiplier, output_shift, input_shape, input.data(),
+        filter_shape, filter.data(), bias_shape, bias.data(), output_shape,
+        expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected))
+        << "accum_depth=" << accum_depth;
+  }
+}
+
+TEST(RvvOpsTest, Int8ConvPerChannelMatchesReferenceAcrossVectorBoundaries) {
+  const ConvParams params = MakeInt8ConvPerChannelParams();
+  constexpr int kBatches = 1;
+  constexpr int kInputHeight = 3;
+  constexpr int kInputWidth = 4;
+  constexpr int kFilterHeight = 2;
+  constexpr int kFilterWidth = 2;
+  constexpr int kOutputHeight = 2;
+  constexpr int kOutputWidth = 3;
+  constexpr int kOutputDepth = 6;
+  const RuntimeShape bias_shape({kOutputDepth});
+  const std::vector<int32_t> bias = MakeInt32Input(kOutputDepth, 211);
+  const int32_t output_multiplier[kOutputDepth] = {
+      1073741824, 1234567890, 1342177280, 987654321, 1503238554, 1191182336};
+  const int32_t output_shift[kOutputDepth] = {-4, -3, -5, -2, -6, -3};
+
+  for (int input_depth : Int8M1VectorLengths()) {
+    if (input_depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape(
+        {kBatches, kInputHeight, kInputWidth, input_depth});
+    const RuntimeShape filter_shape(
+        {kOutputDepth, kFilterHeight, kFilterWidth, input_depth});
+    const RuntimeShape output_shape(
+        {kBatches, kOutputHeight, kOutputWidth, kOutputDepth});
+    const RuntimeShape im2col_shape(
+        {1, kOutputHeight, kOutputWidth,
+         kFilterHeight * kFilterWidth * input_depth});
+    const std::vector<int8_t> input =
+        MakeInt8Input(input_shape.FlatSize(), 29);
+    const std::vector<int8_t> filter =
+        MakeInt8Input(filter_shape.FlatSize(), 179);
+    std::vector<int8_t> im2col(im2col_shape.FlatSize());
+    std::vector<int8_t> actual(output_shape.FlatSize());
+    std::vector<int8_t> expected(output_shape.FlatSize());
+
+    optimized_integer_ops::ConvPerChannel(
+        params, output_multiplier, output_shift, input_shape, input.data(),
+        filter_shape, filter.data(), bias_shape, bias.data(), output_shape,
+        actual.data(), im2col_shape, im2col.data(), nullptr);
+    reference_integer_ops::ConvPerChannel(
+        params, output_multiplier, output_shift, input_shape, input.data(),
+        filter_shape, filter.data(), bias_shape, bias.data(), output_shape,
+        expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected))
+        << "input_depth=" << input_depth;
   }
 }
 
