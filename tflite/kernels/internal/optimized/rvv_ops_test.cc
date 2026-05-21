@@ -22,6 +22,7 @@ limitations under the License.
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/integer_ops/add.h"
 #include "tflite/kernels/internal/optimized/integer_ops/conv.h"
+#include "tflite/kernels/internal/optimized/integer_ops/depthwise_conv.h"
 #include "tflite/kernels/internal/optimized/integer_ops/fully_connected.h"
 #include "tflite/kernels/internal/optimized/integer_ops/leaky_relu.h"
 #include "tflite/kernels/internal/optimized/integer_ops/mul.h"
@@ -34,6 +35,7 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/div.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
 #include "tflite/kernels/internal/reference/integer_ops/conv.h"
+#include "tflite/kernels/internal/reference/integer_ops/depthwise_conv.h"
 #include "tflite/kernels/internal/reference/integer_ops/fully_connected.h"
 #include "tflite/kernels/internal/reference/integer_ops/mul.h"
 #include "tflite/kernels/internal/reference/integer_ops/pooling.h"
@@ -268,6 +270,22 @@ ConvParams MakeInt8ConvPerChannelParams() {
   params.padding_values.width = 0;
   params.quantized_activation_min = -103;
   params.quantized_activation_max = 101;
+  return params;
+}
+
+DepthwiseParams MakeInt8DepthwiseConvPerChannelParams() {
+  DepthwiseParams params;
+  params.padding_values.height = 1;
+  params.padding_values.width = 1;
+  params.stride_height = 1;
+  params.stride_width = 2;
+  params.dilation_height_factor = 1;
+  params.dilation_width_factor = 1;
+  params.depth_multiplier = 1;
+  params.input_offset = -13;
+  params.output_offset = 11;
+  params.quantized_activation_min = -97;
+  params.quantized_activation_max = 103;
   return params;
 }
 
@@ -693,6 +711,59 @@ TEST(RvvOpsTest, Int8ConvPerChannelMatchesReferenceAcrossVectorBoundaries) {
         params, output_multiplier, output_shift, input_shape, input.data(),
         filter_shape, filter.data(), bias_shape, bias.data(), output_shape,
         expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected))
+        << "input_depth=" << input_depth;
+  }
+}
+
+TEST(RvvOpsTest,
+     Int8DepthwiseConvPerChannelMatchesReferenceAcrossVectorBoundaries) {
+  const DepthwiseParams params = MakeInt8DepthwiseConvPerChannelParams();
+  constexpr int kBatches = 1;
+  constexpr int kInputHeight = 4;
+  constexpr int kInputWidth = 5;
+  constexpr int kFilterHeight = 2;
+  constexpr int kFilterWidth = 3;
+  constexpr int kOutputHeight = 5;
+  constexpr int kOutputWidth = 3;
+  CpuBackendContext cpu_backend_context;
+  cpu_backend_context.SetMaxNumThreads(1);
+
+  for (int input_depth : Int8M1VectorLengths()) {
+    if (input_depth == 0) {
+      continue;
+    }
+    const int output_depth = input_depth * params.depth_multiplier;
+    const RuntimeShape input_shape(
+        {kBatches, kInputHeight, kInputWidth, input_depth});
+    const RuntimeShape filter_shape(
+        {1, kFilterHeight, kFilterWidth, output_depth});
+    const RuntimeShape bias_shape({output_depth});
+    const RuntimeShape output_shape(
+        {kBatches, kOutputHeight, kOutputWidth, output_depth});
+    const std::vector<int8_t> input =
+        MakeInt8Input(input_shape.FlatSize(), 53);
+    const std::vector<int8_t> filter =
+        MakeInt8Input(filter_shape.FlatSize(), 197);
+    const std::vector<int32_t> bias = MakeInt32Input(output_depth, 307);
+    std::vector<int32_t> output_multiplier(output_depth);
+    std::vector<int32_t> output_shift(output_depth);
+    for (int i = 0; i < output_depth; ++i) {
+      output_multiplier[i] = 1073741824 + (i % 5) * 67108864;
+      output_shift[i] = -2 - (i % 4);
+    }
+    std::vector<int8_t> actual(output_shape.FlatSize());
+    std::vector<int8_t> expected(output_shape.FlatSize());
+
+    optimized_integer_ops::DepthwiseConvPerChannel(
+        params, output_multiplier.data(), output_shift.data(), input_shape,
+        input.data(), filter_shape, filter.data(), bias_shape, bias.data(),
+        output_shape, actual.data(), &cpu_backend_context);
+    reference_integer_ops::DepthwiseConvPerChannel(
+        params, output_multiplier.data(), output_shift.data(), input_shape,
+        input.data(), filter_shape, filter.data(), bias_shape, bias.data(),
+        output_shape, expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected))
         << "input_depth=" << input_depth;

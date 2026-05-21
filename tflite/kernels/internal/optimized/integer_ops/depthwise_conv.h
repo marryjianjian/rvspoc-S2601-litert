@@ -30,6 +30,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/integer_ops/depthwise_conv_3x3_filter.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/reference/depthwiseconv_uint8.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -1533,6 +1534,56 @@ inline void QuantizedDepthwiseConvAccumRowGeneric(
   }
 }
 
+#if defined(USE_RVV)
+inline void QuantizedDepthwiseConvAccumRowRvvDepthMultiplier1(
+    int stride, int dilation_factor, int input_depth, int input_width,
+    const int8_t* input_data, int16_t input_offset, int pad_width,
+    int depth_multiplier, int filter_width, const int8_t* filter_data,
+    int out_x_buffer_start, int out_x_buffer_end, int output_depth,
+    int32_t* acc_buffer) {
+  TFLITE_DCHECK_EQ(depth_multiplier, 1);
+  TFLITE_DCHECK_EQ(output_depth, input_depth);
+  const int8_t* filter_base_ptr = filter_data;
+  for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+    const int out_x_loop_start = std::max(
+        out_x_buffer_start,
+        (pad_width - dilation_factor * filter_x + stride - 1) / stride);
+    const int out_x_loop_end = std::min(
+        out_x_buffer_end,
+        (pad_width + input_width - dilation_factor * filter_x + stride - 1) /
+            stride);
+
+    int32_t* acc_buffer_ptr =
+        acc_buffer + (out_x_loop_start - out_x_buffer_start) * output_depth;
+    const int in_x_origin =
+        (out_x_loop_start * stride) - pad_width + dilation_factor * filter_x;
+    const int8_t* input_ptr = input_data + in_x_origin * input_depth;
+    const int input_ptr_increment = stride * input_depth;
+    for (int out_x = out_x_loop_start; out_x < out_x_loop_end; ++out_x) {
+      for (int channel = 0; channel < input_depth;) {
+        const size_t vl = __riscv_vsetvl_e8m1(input_depth - channel);
+        const vint8m1_t input_i8 =
+            __riscv_vle8_v_i8m1(input_ptr + channel, vl);
+        const vint8m1_t filter_i8 =
+            __riscv_vle8_v_i8m1(filter_base_ptr + channel, vl);
+        vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
+        const vint16m2_t filter_i16 = __riscv_vsext_vf2_i16m2(filter_i8, vl);
+        input_i16 = __riscv_vadd_vx_i16m2(input_i16, input_offset, vl);
+        vint32m4_t acc = __riscv_vle32_v_i32m4(acc_buffer_ptr + channel, vl);
+        const vint32m4_t product =
+            __riscv_vwmul_vv_i32m4(filter_i16, input_i16, vl);
+        acc = __riscv_vadd_vv_i32m4(acc, product, vl);
+        __riscv_vse32_v_i32m4(acc_buffer_ptr + channel, acc, vl);
+        channel += vl;
+      }
+      input_ptr += input_ptr_increment;
+      acc_buffer_ptr += output_depth;
+    }
+    filter_base_ptr += output_depth;
+  }
+}
+#endif  // USE_RVV
+
 // Initializes the accumulator buffer with bias values.
 inline void DepthwiseConvInitAccBuffer(int num_output_pixels, int output_depth,
                                        const int32_t* bias_data,
@@ -1707,6 +1758,12 @@ inline void DepthwiseConvGeneral(
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
 #endif  // USE_NEON
+
+#ifdef USE_RVV
+  if (!row_accum_func && depth_multiplier == 1) {
+    row_accum_func = QuantizedDepthwiseConvAccumRowRvvDepthMultiplier1;
+  }
+#endif  // USE_RVV
 
   // No matching fast kernel found, use slow fallback.
   if (!row_accum_func) {
