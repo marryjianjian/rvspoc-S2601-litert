@@ -6525,6 +6525,62 @@ inline void Requantize(const input_type* input_data, int32_t size,
                        int32_t effective_scale_multiplier,
                        int32_t effective_scale_shift, int32_t input_zeropoint,
                        int32_t output_zeropoint, output_type* output_data) {
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  int i = 0;
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    vint32m4_t input;
+    if constexpr (std::is_same<input_type, int8_t>::value) {
+      const vint8m1_t input_i8 = __riscv_vle8_v_i8m1(input_data + i, vl);
+      const vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
+      input = __riscv_vsext_vf2_i32m4(input_i16, vl);
+    } else if constexpr (std::is_same<input_type, uint8_t>::value) {
+      const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input_data + i, vl);
+      const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
+      input = __riscv_vreinterpret_v_u32m4_i32m4(
+          __riscv_vzext_vf2_u32m4(input_u16, vl));
+    } else if constexpr (std::is_same<input_type, int16_t>::value) {
+      const vint16m2_t input_i16 = __riscv_vle16_v_i16m2(input_data + i, vl);
+      input = __riscv_vsext_vf2_i32m4(input_i16, vl);
+    } else if constexpr (std::is_same<input_type, int32_t>::value) {
+      input = __riscv_vle32_v_i32m4(input_data + i, vl);
+    } else {
+      break;
+    }
+
+    input = __riscv_vsub_vx_i32m4(input, input_zeropoint, vl);
+    vint32m4_t output = rvv_ops::MultiplyByQuantizedMultiplier(
+        input, effective_scale_multiplier, effective_scale_shift, vl);
+    output = __riscv_vadd_vx_i32m4(output, output_zeropoint, vl);
+    output = __riscv_vmax_vx_i32m4(
+        output, std::numeric_limits<output_type>::min(), vl);
+    output = __riscv_vmin_vx_i32m4(
+        output, std::numeric_limits<output_type>::max(), vl);
+
+    if constexpr (std::is_same<output_type, int8_t>::value) {
+      const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+      const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+      __riscv_vse8_v_i8m1(output_data + i, narrowed_i8, vl);
+    } else if constexpr (std::is_same<output_type, uint8_t>::value) {
+      const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+      const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+      __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
+                          narrowed_i8, vl);
+    } else if constexpr (std::is_same<output_type, int16_t>::value) {
+      const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+      __riscv_vse16_v_i16m2(output_data + i, narrowed_i16, vl);
+    } else if constexpr (std::is_same<output_type, int32_t>::value) {
+      __riscv_vse32_v_i32m4(output_data + i, output, vl);
+    } else {
+      break;
+    }
+    i += vl;
+  }
+  if (i == size) {
+    return;
+  }
+#endif  // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+
   reference_ops::Requantize(input_data, size, effective_scale_multiplier,
                             effective_scale_shift, input_zeropoint,
                             output_zeropoint, output_data);
@@ -6543,6 +6599,27 @@ inline void Requantize<int8_t, uint8_t>(const int8_t* input_data, int32_t size,
   static constexpr int32_t kMaxOutput = std::numeric_limits<uint8_t>::max();
 
   int i = 0;
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vint8m1_t input_i8 = __riscv_vle8_v_i8m1(input_data + i, vl);
+    const vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
+    vint32m4_t input = __riscv_vsub_vx_i32m4(
+        __riscv_vsext_vf2_i32m4(input_i16, vl), input_zeropoint, vl);
+    vint32m4_t output = rvv_ops::MultiplyByQuantizedMultiplier(
+        input, effective_scale_multiplier, effective_scale_shift, vl);
+    output = __riscv_vadd_vx_i32m4(output, output_zeropoint, vl);
+    output = __riscv_vmax_vx_i32m4(output, kMinOutput, vl);
+    output = __riscv_vmin_vx_i32m4(output, kMaxOutput, vl);
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
+                        narrowed_i8, vl);
+    i += vl;
+  }
+  return;
+#endif  // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+
 #ifdef USE_NEON
   // Constants.
   const int32x4_t input_zero_point_dup = vdupq_n_s32(-input_zeropoint);
@@ -6630,6 +6707,28 @@ inline void Requantize<uint8_t, int8_t>(const uint8_t* input_data, int32_t size,
   static constexpr int32_t kMaxOutput = std::numeric_limits<int8_t>::max();
 
   int i = 0;
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input_data + i, vl);
+    const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
+    vint32m4_t input = __riscv_vsub_vx_i32m4(
+        __riscv_vreinterpret_v_u32m4_i32m4(
+            __riscv_vzext_vf2_u32m4(input_u16, vl)),
+        input_zeropoint, vl);
+    vint32m4_t output = rvv_ops::MultiplyByQuantizedMultiplier(
+        input, effective_scale_multiplier, effective_scale_shift, vl);
+    output = __riscv_vadd_vx_i32m4(output, output_zeropoint, vl);
+    output = __riscv_vmax_vx_i32m4(output, kMinOutput, vl);
+    output = __riscv_vmin_vx_i32m4(output, kMaxOutput, vl);
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(output_data + i, narrowed_i8, vl);
+    i += vl;
+  }
+  return;
+#endif  // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+
 #ifdef USE_NEON
   // Constants.
   const int32x4_t input_zero_point_dup = vdupq_n_s32(-input_zeropoint);
@@ -6708,6 +6807,26 @@ inline void Requantize<int8_t, int8_t>(const int8_t* input_data, int32_t size,
   static constexpr int32_t kMaxOutput = std::numeric_limits<int8_t>::max();
 
   int i = 0;
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vint8m1_t input_i8 = __riscv_vle8_v_i8m1(input_data + i, vl);
+    const vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
+    vint32m4_t input = __riscv_vsub_vx_i32m4(
+        __riscv_vsext_vf2_i32m4(input_i16, vl), input_zeropoint, vl);
+    vint32m4_t output = rvv_ops::MultiplyByQuantizedMultiplier(
+        input, effective_scale_multiplier, effective_scale_shift, vl);
+    output = __riscv_vadd_vx_i32m4(output, output_zeropoint, vl);
+    output = __riscv_vmax_vx_i32m4(output, kMinOutput, vl);
+    output = __riscv_vmin_vx_i32m4(output, kMaxOutput, vl);
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(output_data + i, narrowed_i8, vl);
+    i += vl;
+  }
+  return;
+#endif  // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+
 #ifdef USE_NEON
   // Constants.
   const int32x4_t input_zero_point_dup = vdupq_n_s32(-input_zeropoint);
@@ -6785,6 +6904,29 @@ inline void Requantize<uint8_t, uint8_t>(
   static constexpr int32_t kMaxOutput = std::numeric_limits<uint8_t>::max();
 
   int i = 0;
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+  for (; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input_data + i, vl);
+    const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
+    vint32m4_t input = __riscv_vsub_vx_i32m4(
+        __riscv_vreinterpret_v_u32m4_i32m4(
+            __riscv_vzext_vf2_u32m4(input_u16, vl)),
+        input_zeropoint, vl);
+    vint32m4_t output = rvv_ops::MultiplyByQuantizedMultiplier(
+        input, effective_scale_multiplier, effective_scale_shift, vl);
+    output = __riscv_vadd_vx_i32m4(output, output_zeropoint, vl);
+    output = __riscv_vmax_vx_i32m4(output, kMinOutput, vl);
+    output = __riscv_vmin_vx_i32m4(output, kMaxOutput, vl);
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
+                        narrowed_i8, vl);
+    i += vl;
+  }
+  return;
+#endif  // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+
 #ifdef USE_NEON
   // Constants.
   const int32x4_t input_zero_point_dup = vdupq_n_s32(-input_zeropoint);
@@ -7196,6 +7338,23 @@ inline void Dequantize(const tflite::DequantizationParams& op_params,
   const int flat_size = MatchingFlatSize(input_shape, output_shape);
 
   int i = 0;
+#if defined(USE_RVV)
+  const float scale_f = static_cast<float>(scale);
+  const float zero_times_scale = static_cast<float>(-zero_point * scale);
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(flat_size - i);
+    const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input_data + i, vl);
+    const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
+    const vint32m4_t input_i32 = __riscv_vreinterpret_v_u32m4_i32m4(
+        __riscv_vzext_vf2_u32m4(input_u16, vl));
+    vfloat32m4_t output = __riscv_vfcvt_f_x_v_f32m4(input_i32, vl);
+    output = __riscv_vfmul_vf_f32m4(output, scale_f, vl);
+    output = __riscv_vfadd_vf_f32m4(output, zero_times_scale, vl);
+    __riscv_vse32_v_f32m4(output_data + i, output, vl);
+    i += vl;
+  }
+#endif  // USE_RVV
+
 #ifdef USE_NEON
   const float32x4_t scale_dup = vdupq_n_f32(static_cast<float>(scale));
   const float32x4_t zero_times_scale_dup =
@@ -7236,6 +7395,22 @@ inline void Dequantize(const tflite::DequantizationParams& op_params,
   const int flat_size = MatchingFlatSize(input_shape, output_shape);
 
   int i = 0;
+#if defined(USE_RVV)
+  const float scale_f = static_cast<float>(scale);
+  const float zero_times_scale = static_cast<float>(-zero_point * scale);
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(flat_size - i);
+    const vint8m1_t input_i8 = __riscv_vle8_v_i8m1(input_data + i, vl);
+    const vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
+    const vint32m4_t input_i32 = __riscv_vsext_vf2_i32m4(input_i16, vl);
+    vfloat32m4_t output = __riscv_vfcvt_f_x_v_f32m4(input_i32, vl);
+    output = __riscv_vfmul_vf_f32m4(output, scale_f, vl);
+    output = __riscv_vfadd_vf_f32m4(output, zero_times_scale, vl);
+    __riscv_vse32_v_f32m4(output_data + i, output, vl);
+    i += vl;
+  }
+#endif  // USE_RVV
+
 #ifdef USE_NEON
   const float32x4_t scale_dup = vdupq_n_f32(static_cast<float>(scale));
   const float32x4_t zero_times_scale_dup =
@@ -7275,6 +7450,21 @@ inline void Dequantize(const tflite::DequantizationParams& op_params,
   const int flat_size = MatchingFlatSize(input_shape, output_shape);
 
   int i = 0;
+#if defined(USE_RVV)
+  const float scale_f = static_cast<float>(scale);
+  const float zero_times_scale = static_cast<float>(-zero_point * scale);
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e16m2(flat_size - i);
+    const vint16m2_t input_i16 = __riscv_vle16_v_i16m2(input_data + i, vl);
+    const vint32m4_t input_i32 = __riscv_vsext_vf2_i32m4(input_i16, vl);
+    vfloat32m4_t output = __riscv_vfcvt_f_x_v_f32m4(input_i32, vl);
+    output = __riscv_vfmul_vf_f32m4(output, scale_f, vl);
+    output = __riscv_vfadd_vf_f32m4(output, zero_times_scale, vl);
+    __riscv_vse32_v_f32m4(output_data + i, output, vl);
+    i += vl;
+  }
+#endif  // USE_RVV
+
 #ifdef USE_NEON
   const float32x4_t scale_dup = vdupq_n_f32(static_cast<float>(scale));
   const float32x4_t zero_times_scale_dup =
@@ -7331,6 +7521,25 @@ inline void AffineQuantize(const tflite::QuantizationParams& op_params,
   static constexpr int32_t max_val = std::numeric_limits<int8_t>::max();
 
   int i = 0;
+#if defined(USE_RVV)
+  constexpr unsigned kRoundToNearestTiesToMaxMagnitude = 4;
+  const float reverse_scale = static_cast<float>(1.0 / scale);
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(flat_size - i);
+    vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
+    input = __riscv_vfmul_vf_f32m4(input, reverse_scale, vl);
+    vint32m4_t quantized = __riscv_vfcvt_x_f_v_i32m4_rm(
+        input, kRoundToNearestTiesToMaxMagnitude, vl);
+    quantized = __riscv_vadd_vx_i32m4(quantized, zero_point, vl);
+    quantized = __riscv_vmax_vx_i32m4(quantized, min_val, vl);
+    quantized = __riscv_vmin_vx_i32m4(quantized, max_val, vl);
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(quantized, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(output_data + i, narrowed_i8, vl);
+    i += vl;
+  }
+#endif  // USE_RVV
+
 #ifdef USE_NEON
   const float32x4_t reverse_scale_dup = vdupq_n_f32(1.0f / scale);
   const int32x4_t zero_point_dup = vdupq_n_s32(zero_point);
@@ -7388,6 +7597,26 @@ inline void AffineQuantize(const tflite::QuantizationParams& op_params,
   static constexpr int32_t max_val = std::numeric_limits<uint8_t>::max();
 
   int i = 0;
+#if defined(USE_RVV)
+  constexpr unsigned kRoundToNearestTiesToMaxMagnitude = 4;
+  const float reverse_scale = static_cast<float>(1.0 / scale);
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(flat_size - i);
+    vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
+    input = __riscv_vfmul_vf_f32m4(input, reverse_scale, vl);
+    vint32m4_t quantized = __riscv_vfcvt_x_f_v_i32m4_rm(
+        input, kRoundToNearestTiesToMaxMagnitude, vl);
+    quantized = __riscv_vadd_vx_i32m4(quantized, zero_point, vl);
+    quantized = __riscv_vmax_vx_i32m4(quantized, min_val, vl);
+    quantized = __riscv_vmin_vx_i32m4(quantized, max_val, vl);
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(quantized, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
+                        narrowed_i8, vl);
+    i += vl;
+  }
+#endif  // USE_RVV
+
 #ifdef USE_NEON
   const float32x4_t reverse_scale_dup = vdupq_n_f32(1.0f / scale);
   const int32x4_t zero_point_dup = vdupq_n_s32(zero_point);
@@ -7446,6 +7675,24 @@ inline void AffineQuantize(const tflite::QuantizationParams& op_params,
   static constexpr int32_t max_val = std::numeric_limits<int16_t>::max();
 
   int i = 0;
+#if defined(USE_RVV)
+  constexpr unsigned kRoundToNearestTiesToMaxMagnitude = 4;
+  const float reverse_scale = static_cast<float>(1.0 / scale);
+  for (; i < flat_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(flat_size - i);
+    vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
+    input = __riscv_vfmul_vf_f32m4(input, reverse_scale, vl);
+    vint32m4_t quantized = __riscv_vfcvt_x_f_v_i32m4_rm(
+        input, kRoundToNearestTiesToMaxMagnitude, vl);
+    quantized = __riscv_vadd_vx_i32m4(quantized, zero_point, vl);
+    quantized = __riscv_vmax_vx_i32m4(quantized, min_val, vl);
+    quantized = __riscv_vmin_vx_i32m4(quantized, max_val, vl);
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(quantized, 0, vl);
+    __riscv_vse16_v_i16m2(output_data + i, narrowed_i16, vl);
+    i += vl;
+  }
+#endif  // USE_RVV
+
 #ifdef USE_NEON
   const float32x4_t reverse_scale_dup = vdupq_n_f32(1.0f / scale);
   const int32x4_t zero_point_dup = vdupq_n_s32(zero_point);

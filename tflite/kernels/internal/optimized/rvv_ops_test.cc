@@ -34,7 +34,9 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/integer_ops/mul.h"
 #include "tflite/kernels/internal/reference/integer_ops/pooling.h"
 #include "tflite/kernels/internal/reference/mul.h"
+#include "tflite/kernels/internal/reference/quantize.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
+#include "tflite/kernels/internal/reference/requantize.h"
 #include "tflite/kernels/internal/reference/sub.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -307,6 +309,232 @@ TEST(RvvOpsTest, RequiresRvvBuildToExerciseVectorPaths) {
 }
 
 #ifdef USE_RVV
+
+TEST(RvvOpsTest, AffineQuantizeInt8MatchesReferenceAcrossVectorBoundaries) {
+  QuantizationParams params;
+  params.zero_point = -7;
+  params.scale = 0.25f;
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    std::vector<float> input(size);
+    for (int i = 0; i < size; ++i) {
+      input[i] = static_cast<float>((i % 41) - 20) * 0.125f;
+    }
+    std::vector<int8_t> actual(size);
+    std::vector<int8_t> expected(size);
+
+    optimized_ops::AffineQuantize(params, shape, input.data(), shape,
+                                  actual.data());
+    reference_ops::AffineQuantize(params, shape, input.data(), shape,
+                                  expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, AffineQuantizeUint8MatchesReferenceAcrossVectorBoundaries) {
+  QuantizationParams params;
+  params.zero_point = 119;
+  params.scale = 0.125f;
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    std::vector<float> input(size);
+    for (int i = 0; i < size; ++i) {
+      input[i] = static_cast<float>((i % 47) - 23) * 0.0625f;
+    }
+    std::vector<uint8_t> actual(size);
+    std::vector<uint8_t> expected(size);
+
+    optimized_ops::AffineQuantize(params, shape, input.data(), shape,
+                                  actual.data());
+    reference_ops::AffineQuantize(params, shape, input.data(), shape,
+                                  expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, AffineQuantizeInt16MatchesReferenceAcrossVectorBoundaries) {
+  QuantizationParams params;
+  params.zero_point = 0;
+  params.scale = 0.03125f;
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    std::vector<float> input(size);
+    for (int i = 0; i < size; ++i) {
+      input[i] = static_cast<float>((i % 53) - 26) * 0.015625f;
+    }
+    std::vector<int16_t> actual(size);
+    std::vector<int16_t> expected(size);
+
+    optimized_ops::AffineQuantize(params, shape, input.data(), shape,
+                                  actual.data());
+    reference_ops::AffineQuantize(params, shape, input.data(), shape,
+                                  expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, DequantizeInt8MatchesReferenceAcrossVectorBoundaries) {
+  DequantizationParams params;
+  params.zero_point = -5;
+  params.scale = 0.03125f;
+
+  for (int size : Int8M1VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<int8_t> input = MakeInt8Input(size, 17);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::Dequantize(params, shape, input.data(), shape,
+                              actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = static_cast<float>(
+          params.scale * (input[i] - params.zero_point));
+    }
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, DequantizeUint8MatchesReferenceAcrossVectorBoundaries) {
+  DequantizationParams params;
+  params.zero_point = 127;
+  params.scale = 0.015625f;
+
+  for (int size : Int8M1VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<uint8_t> input = MakeUint8Input(size, 31);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::Dequantize(params, shape, input.data(), shape,
+                              actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = static_cast<float>(
+          params.scale * (input[i] - params.zero_point));
+    }
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, DequantizeInt16MatchesReferenceAcrossVectorBoundaries) {
+  DequantizationParams params;
+  params.zero_point = 0;
+  params.scale = 0.000244140625f;
+
+  for (int size : Int16M2VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<int16_t> input = MakeInt16Input(size, 211);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::Dequantize(params, shape, input.data(), shape,
+                              actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = static_cast<float>(
+          params.scale * (input[i] - params.zero_point));
+    }
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, RequantizeInt8ToUint8MatchesReferenceAcrossVectorBoundaries) {
+  constexpr int32_t kMultiplier = 1234567890;
+  constexpr int kShift = -3;
+  constexpr int32_t kInputZeroPoint = -11;
+  constexpr int32_t kOutputZeroPoint = 129;
+
+  for (int size : Int8M1VectorLengths()) {
+    const std::vector<int8_t> input = MakeInt8Input(size, 73);
+    std::vector<uint8_t> actual(size);
+    std::vector<uint8_t> expected(size);
+
+    optimized_ops::Requantize(input.data(), size, kMultiplier, kShift,
+                              kInputZeroPoint, kOutputZeroPoint,
+                              actual.data());
+    reference_ops::Requantize(input.data(), size, kMultiplier, kShift,
+                              kInputZeroPoint, kOutputZeroPoint,
+                              expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, RequantizeUint8ToInt8MatchesReferenceAcrossVectorBoundaries) {
+  constexpr int32_t kMultiplier = 1325400064;
+  constexpr int kShift = -2;
+  constexpr int32_t kInputZeroPoint = 121;
+  constexpr int32_t kOutputZeroPoint = -9;
+
+  for (int size : Int8M1VectorLengths()) {
+    const std::vector<uint8_t> input = MakeUint8Input(size, 97);
+    std::vector<int8_t> actual(size);
+    std::vector<int8_t> expected(size);
+
+    optimized_ops::Requantize(input.data(), size, kMultiplier, kShift,
+                              kInputZeroPoint, kOutputZeroPoint,
+                              actual.data());
+    reference_ops::Requantize(input.data(), size, kMultiplier, kShift,
+                              kInputZeroPoint, kOutputZeroPoint,
+                              expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, RequantizeInt8ToInt8MatchesReferenceAcrossVectorBoundaries) {
+  constexpr int32_t kMultiplier = 1073741824;
+  constexpr int kShift = 1;
+  constexpr int32_t kInputZeroPoint = -3;
+  constexpr int32_t kOutputZeroPoint = 5;
+
+  for (int size : Int8M1VectorLengths()) {
+    const std::vector<int8_t> input = MakeInt8Input(size, 151);
+    std::vector<int8_t> actual(size);
+    std::vector<int8_t> expected(size);
+
+    optimized_ops::Requantize(input.data(), size, kMultiplier, kShift,
+                              kInputZeroPoint, kOutputZeroPoint,
+                              actual.data());
+    reference_ops::Requantize(input.data(), size, kMultiplier, kShift,
+                              kInputZeroPoint, kOutputZeroPoint,
+                              expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, RequantizeInt32ToInt16MatchesReferenceAcrossVectorBoundaries) {
+  constexpr int32_t kMultiplier = 987654321;
+  constexpr int kShift = -4;
+  constexpr int32_t kInputZeroPoint = 17;
+  constexpr int32_t kOutputZeroPoint = -23;
+
+  for (int size : Float32M4VectorLengths()) {
+    const std::vector<int32_t> input = MakeInt32Input(size, 503);
+    std::vector<int16_t> actual(size);
+    std::vector<int16_t> expected(size);
+
+    optimized_ops::Requantize(input.data(), size, kMultiplier, kShift,
+                              kInputZeroPoint, kOutputZeroPoint,
+                              actual.data());
+    reference_ops::Requantize(input.data(), size, kMultiplier, kShift,
+                              kInputZeroPoint, kOutputZeroPoint,
+                              expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
 
 TEST(RvvOpsTest, AddElementwiseMatchesScalarReferenceAcrossVectorBoundaries) {
   ArithmeticParams params;
