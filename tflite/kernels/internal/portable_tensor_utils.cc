@@ -20,9 +20,11 @@ limitations under the License.
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 
 #include "tflite/core/c/builtin_op_data.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 
 #if defined(_MSC_VER)
 #define __restrict__ __restrict
@@ -40,6 +42,16 @@ namespace tensor_utils {
 // Apply Rectified Linear to elements of a vector.
 void ApplyReluToVector(const float* __restrict__ vector, int v_size,
                        float* __restrict__ result) {
+#if defined(USE_RVV)
+  for (int i = 0; i < v_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(v_size - i);
+    vfloat32m4_t values = __riscv_vle32_v_f32m4(vector + i, vl);
+    values = __riscv_vfmax_vf_f32m4(values, 0.0f, vl);
+    __riscv_vse32_v_f32m4(result + i, values, vl);
+    i += vl;
+  }
+  return;
+#endif
   for (int v = 0; v < v_size; v++) {
     result[v] = std::max(0.0f, vector[v]);
   }
@@ -48,6 +60,17 @@ void ApplyReluToVector(const float* __restrict__ vector, int v_size,
 // Apply Rectified Linear 1 (cap to [-1;1]) to elements of a vector
 void ApplyRelu1ToVector(const float* __restrict__ vector, int v_size,
                         float* __restrict__ result) {
+#if defined(USE_RVV)
+  for (int i = 0; i < v_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(v_size - i);
+    vfloat32m4_t values = __riscv_vle32_v_f32m4(vector + i, vl);
+    values = __riscv_vfmax_vf_f32m4(values, -1.0f, vl);
+    values = __riscv_vfmin_vf_f32m4(values, 1.0f, vl);
+    __riscv_vse32_v_f32m4(result + i, values, vl);
+    i += vl;
+  }
+  return;
+#endif
   for (int v = 0; v < v_size; v++) {
     result[v] = std::max(-1.0f, std::min(vector[v], 1.0f));
   }
@@ -56,6 +79,17 @@ void ApplyRelu1ToVector(const float* __restrict__ vector, int v_size,
 // Apply Rectified Linear 6 (cap to [0;6]) to elements of a vector
 void ApplyRelu6ToVector(const float* __restrict__ vector, int v_size,
                         float* __restrict__ result) {
+#if defined(USE_RVV)
+  for (int i = 0; i < v_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(v_size - i);
+    vfloat32m4_t values = __riscv_vle32_v_f32m4(vector + i, vl);
+    values = __riscv_vfmax_vf_f32m4(values, 0.0f, vl);
+    values = __riscv_vfmin_vf_f32m4(values, 6.0f, vl);
+    __riscv_vse32_v_f32m4(result + i, values, vl);
+    i += vl;
+  }
+  return;
+#endif
   for (int v = 0; v < v_size; v++) {
     result[v] = std::max(0.0f, std::min(vector[v], 6.0f));
   }
@@ -64,6 +98,22 @@ void ApplyRelu6ToVector(const float* __restrict__ vector, int v_size,
 // Apply signbit to elements of a vector
 void ApplySignbitToVector(const float* __restrict__ vector, int v_size,
                           float* __restrict__ result) {
+#if defined(USE_RVV)
+  for (int i = 0; i < v_size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(v_size - i);
+    const vfloat32m4_t values = __riscv_vle32_v_f32m4(vector + i, vl);
+    const vuint32m4_t bits = __riscv_vreinterpret_v_f32m4_u32m4(values);
+    const vuint32m4_t sign_bits =
+        __riscv_vand_vx_u32m4(bits, 0x80000000u, vl);
+    const vbool8_t negative_mask =
+        __riscv_vmsne_vx_u32m4_b8(sign_bits, 0, vl);
+    vfloat32m4_t output = __riscv_vfmv_v_f_f32m4(0.0f, vl);
+    output = __riscv_vfmerge_vfm_f32m4(output, 1.0f, negative_mask, vl);
+    __riscv_vse32_v_f32m4(result + i, output, vl);
+    i += vl;
+  }
+  return;
+#endif
   for (int v = 0; v < v_size; v++) {
     result[v] = std::signbit(vector[v]);
   }

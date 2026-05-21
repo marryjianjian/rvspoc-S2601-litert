@@ -202,6 +202,37 @@ void RvvVectorBatchVectorCwiseProductAccumulate(
   }
 }
 #endif  // !TFLITE_SINGLE_ROUNDING
+
+float RvvDotProductFloat(const float* lhs, const float* rhs, int size) {
+  float result = 0.0f;
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vfloat32m4_t lhs_values = __riscv_vle32_v_f32m4(lhs + i, vl);
+    const vfloat32m4_t rhs_values = __riscv_vle32_v_f32m4(rhs + i, vl);
+    const vfloat32m4_t product =
+        __riscv_vfmul_vv_f32m4(lhs_values, rhs_values, vl);
+    vfloat32m1_t scalar = __riscv_vfmv_v_f_f32m1(0.0f, 1);
+    scalar = __riscv_vfredusum_vs_f32m4_f32m1(product, scalar, vl);
+    result += __riscv_vfmv_f_s_f32m1_f32(scalar);
+    i += vl;
+  }
+  return result;
+}
+
+int32_t RvvDotProductInt8(const int8_t* lhs, const int8_t* rhs, int size) {
+  vint32m1_t reduced = __riscv_vmv_v_x_i32m1(0, 1);
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vint8m1_t lhs_i8 = __riscv_vle8_v_i8m1(lhs + i, vl);
+    const vint8m1_t rhs_i8 = __riscv_vle8_v_i8m1(rhs + i, vl);
+    const vint16m2_t lhs_i16 = __riscv_vsext_vf2_i16m2(lhs_i8, vl);
+    const vint16m2_t rhs_i16 = __riscv_vsext_vf2_i16m2(rhs_i8, vl);
+    const vint32m4_t product = __riscv_vwmul_vv_i32m4(lhs_i16, rhs_i16, vl);
+    reduced = __riscv_vredsum_vs_i32m4_i32m1(product, reduced, vl);
+    i += vl;
+  }
+  return __riscv_vmv_x_s_i32m1_i32(reduced);
+}
 #endif  // defined(USE_RVV)
 }  // namespace
 
@@ -290,6 +321,20 @@ void PortableMatrixBatchVectorMultiplyAccumulate(const float* matrix,
                                                  int m_rows, int m_cols,
                                                  const float* vector,
                                                  int n_batch, float* result) {
+#if defined(USE_RVV)
+  {
+    float* result_in_batch = result;
+    for (int b = 0; b < n_batch; ++b) {
+      const float* vector_in_batch = vector + b * m_cols;
+      for (int r = 0; r < m_rows; ++r) {
+        result_in_batch[r] +=
+            RvvDotProductFloat(matrix + r * m_cols, vector_in_batch, m_cols);
+      }
+      result_in_batch += m_rows;
+    }
+  }
+  return;
+#endif
   float* result_in_batch = result;
   for (int b = 0; b < n_batch; b++) {
     const float* matrix_ptr = matrix;
@@ -309,6 +354,18 @@ void PortableMatrixBatchVectorMultiplyAccumulate(
     const int8_t* __restrict__ matrix, const int m_rows, const int m_cols,
     const int8_t* __restrict__ vectors, const float* scaling_factors,
     int n_batch, float* __restrict__ result) {
+#if defined(USE_RVV)
+  for (int batch = 0; batch < n_batch; ++batch, vectors += m_cols) {
+    const float batch_scaling_factor = scaling_factors[batch];
+    for (int row = 0; row < m_rows; ++row) {
+      const int32_t dotprod =
+          RvvDotProductInt8(matrix + row * m_cols, vectors, m_cols);
+      *result += dotprod * batch_scaling_factor;
+      ++result;
+    }
+  }
+  return;
+#endif
   for (int batch = 0; batch < n_batch; ++batch, vectors += m_cols) {
     const float batch_scaling_factor = scaling_factors[batch];
     // Get the address of the first row.
@@ -351,13 +408,16 @@ void PortableMatrixBatchVectorMultiplyAccumulate(
   for (int batch = 0; batch < n_batch; ++batch, vectors += m_cols) {
     const float batch_scaling_factor = scaling_factors[batch];
     const int32_t batch_offset = input_offset[batch];
-    const int8_t* row_ptr = matrix;
     for (int row = 0; row < m_rows; ++row) {
       int32_t dotprod = 0;
       float scale = batch_scaling_factor;
       if (per_channel_scale) {
         scale *= per_channel_scale[row];
       }
+#if defined(USE_RVV)
+      dotprod = RvvDotProductInt8(matrix + row * m_cols, vectors, m_cols);
+#else
+      const int8_t* row_ptr = matrix + row * m_cols;
 #if defined(__GNUC__)
       // Prefetch the row to cache.
       __builtin_prefetch(row_ptr, 0 /* prefetch for read */,
@@ -366,6 +426,7 @@ void PortableMatrixBatchVectorMultiplyAccumulate(
       for (int col = 0; col < m_cols; ++col, ++row_ptr) {
         dotprod += (*row_ptr) * vectors[col];
       }  // for col
+#endif
       dotprod -= row_sums[row] * batch_offset;
       *result += dotprod * scale;
       ++result;

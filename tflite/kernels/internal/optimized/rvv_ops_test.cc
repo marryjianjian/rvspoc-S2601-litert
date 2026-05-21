@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -32,6 +33,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
 #include "tflite/kernels/internal/optimized/reduce.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
+#include "tflite/kernels/internal/portable_tensor_utils.h"
 #include "tflite/kernels/internal/reference/add.h"
 #include "tflite/kernels/internal/reference/div.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
@@ -1787,6 +1789,190 @@ void ReferenceLstmVectorBatchVectorCwiseProductAccumulate(
       output = std::min(std::max(output, static_cast<int32_t>(-32768)),
                         static_cast<int32_t>(32767));
       result[index] = static_cast<int16_t>(output);
+    }
+  }
+}
+
+void ReferenceRnnMatrixBatchVectorMultiplyAccumulateFloat(
+    const float* matrix, int m_rows, int m_cols, const float* vector,
+    int n_batch, float* result) {
+  float* result_in_batch = result;
+  for (int batch = 0; batch < n_batch; ++batch) {
+    for (int row = 0; row < m_rows; ++row) {
+      float dot_product = 0.0f;
+      for (int col = 0; col < m_cols; ++col) {
+        dot_product += matrix[row * m_cols + col] *
+                       vector[batch * m_cols + col];
+      }
+      *result_in_batch += dot_product;
+      ++result_in_batch;
+    }
+  }
+}
+
+void ReferenceRnnMatrixBatchVectorMultiplyAccumulateInt8(
+    const int8_t* matrix, int m_rows, int m_cols, const int8_t* vectors,
+    const float* scaling_factors, int n_batch, const float* per_channel_scale,
+    const int32_t* input_offset, const int32_t* row_sums, float* result) {
+  for (int batch = 0; batch < n_batch; ++batch) {
+    for (int row = 0; row < m_rows; ++row) {
+      int32_t dot_product = 0;
+      for (int col = 0; col < m_cols; ++col) {
+        dot_product += matrix[row * m_cols + col] *
+                       vectors[batch * m_cols + col];
+      }
+      float scale = scaling_factors[batch];
+      if (per_channel_scale != nullptr) {
+        scale *= per_channel_scale[row];
+      }
+      if (input_offset != nullptr) {
+        dot_product -= row_sums[row] * input_offset[batch];
+      }
+      *result += dot_product * scale;
+      ++result;
+    }
+  }
+}
+
+std::vector<int32_t> ReferenceRnnRowSums(const int8_t* matrix, int m_rows,
+                                         int m_cols) {
+  std::vector<int32_t> row_sums(m_rows);
+  for (int row = 0; row < m_rows; ++row) {
+    int32_t sum = 0;
+    for (int col = 0; col < m_cols; ++col) {
+      sum += matrix[row * m_cols + col];
+    }
+    row_sums[row] = sum;
+  }
+  return row_sums;
+}
+
+TEST(RvvOpsTest,
+     RnnFloatMatrixBatchVectorMultiplyAccumulateMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kRows = 7;
+  constexpr int kBatch = 3;
+
+  for (int cols : Float32M4VectorLengths()) {
+    const std::vector<float> matrix = MakeInput(kRows * cols, 0.125f);
+    const std::vector<float> vector = MakeInput(kBatch * cols, -0.375f);
+    std::vector<float> actual = MakeInput(kRows * kBatch, 0.25f);
+    std::vector<float> expected = actual;
+
+    tensor_utils::MatrixBatchVectorMultiplyAccumulate(
+        matrix.data(), kRows, cols, vector.data(), kBatch, actual.data());
+    ReferenceRnnMatrixBatchVectorMultiplyAccumulateFloat(
+        matrix.data(), kRows, cols, vector.data(), kBatch, expected.data());
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-4f), expected))
+        << "cols=" << cols;
+  }
+}
+
+TEST(RvvOpsTest,
+     RnnHybridInt8MatrixBatchVectorMultiplyAccumulateMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kRows = 6;
+  constexpr int kBatch = 3;
+  const std::vector<float> scaling_factors = {0.03125f, 0.046875f, 0.0625f};
+
+  for (int cols : Int8M1VectorLengths()) {
+    const std::vector<int8_t> matrix = MakeInt8Input(kRows * cols, 19);
+    const std::vector<int8_t> vectors = MakeInt8Input(kBatch * cols, 113);
+    std::vector<float> actual = MakeInput(kRows * kBatch, -0.125f);
+    std::vector<float> expected = actual;
+
+    tensor_utils::MatrixBatchVectorMultiplyAccumulate(
+        matrix.data(), kRows, cols, vectors.data(), scaling_factors.data(),
+        kBatch, actual.data());
+    ReferenceRnnMatrixBatchVectorMultiplyAccumulateInt8(
+        matrix.data(), kRows, cols, vectors.data(), scaling_factors.data(),
+        kBatch, /*per_channel_scale=*/nullptr, /*input_offset=*/nullptr,
+        /*row_sums=*/nullptr, expected.data());
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "cols=" << cols;
+  }
+}
+
+TEST(RvvOpsTest,
+     RnnHybridInt8MatrixBatchVectorMultiplyAccumulateWithOffsetsMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kRows = 5;
+  constexpr int kBatch = 3;
+  const std::vector<float> scaling_factors = {0.03125f, 0.046875f, 0.0625f};
+  const std::vector<float> per_channel_scale = {0.5f, 0.75f, 1.0f, 1.25f,
+                                                1.5f};
+  const std::vector<int32_t> input_offsets = {-3, 5, -7};
+
+  for (int cols : Int8M1VectorLengths()) {
+    const std::vector<int8_t> matrix = MakeInt8Input(kRows * cols, 37);
+    const std::vector<int8_t> vectors = MakeInt8Input(kBatch * cols, 211);
+    std::vector<float> actual = MakeInput(kRows * kBatch, 0.375f);
+    std::vector<float> expected = actual;
+    std::vector<int32_t> actual_row_sums(kRows);
+    std::vector<int32_t> scratch(kRows * kBatch);
+    bool compute_row_sums = true;
+    const std::vector<int32_t> expected_row_sums =
+        ReferenceRnnRowSums(matrix.data(), kRows, cols);
+
+    tensor_utils::MatrixBatchVectorMultiplyAccumulate(
+        matrix.data(), kRows, cols, vectors.data(), scaling_factors.data(),
+        kBatch, actual.data(), per_channel_scale.data(), input_offsets.data(),
+        scratch.data(), actual_row_sums.data(), &compute_row_sums,
+        /*context=*/nullptr);
+    ReferenceRnnMatrixBatchVectorMultiplyAccumulateInt8(
+        matrix.data(), kRows, cols, vectors.data(), scaling_factors.data(),
+        kBatch, per_channel_scale.data(), input_offsets.data(),
+        expected_row_sums.data(), expected.data());
+
+    EXPECT_THAT(actual_row_sums, ElementsAreArray(expected_row_sums))
+        << "cols=" << cols;
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "cols=" << cols;
+    EXPECT_FALSE(compute_row_sums) << "cols=" << cols;
+  }
+}
+
+TEST(RvvOpsTest,
+     RnnFloatActivationsMatchReferenceAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    const std::vector<float> input = MakeInput(size, -0.25f);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    tensor_utils::ApplyReluToVector(input.data(), size, actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::max(0.0f, input[i]);
+    }
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "Relu size=" << size;
+
+    tensor_utils::ApplyRelu1ToVector(input.data(), size, actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::max(-1.0f, std::min(input[i], 1.0f));
+    }
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "Relu1 size=" << size;
+
+    tensor_utils::ApplyRelu6ToVector(input.data(), size, actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::max(0.0f, std::min(input[i], 6.0f));
+    }
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "Relu6 size=" << size;
+
+    tensor_utils::ApplySignbitToVector(input.data(), size, actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::signbit(input[i]);
+    }
+    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
+        << "Signbit size=" << size;
+
+    if (size >= 2) {
+      std::vector<float> zero_input(size, 0.0f);
+      zero_input[0] = -0.0f;
+      tensor_utils::ApplySignbitToVector(zero_input.data(), size,
+                                         actual.data());
+      EXPECT_EQ(actual[0], 1.0f) << "negative zero size=" << size;
+      EXPECT_EQ(actual[1], 0.0f) << "positive zero size=" << size;
     }
   }
 }

@@ -1358,6 +1358,7 @@ cc_test(
         ":common",
         ":optimized_base",
         ":portable_tensor_utils",
+        ":tensor_utils_no_eigen",
         "@com_google_googletest//:gtest_main",
     ],
 )
