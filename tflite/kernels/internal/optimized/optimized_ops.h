@@ -56,6 +56,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/neon_check.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/optimized/rvv_ops.h"
+#include "tflite/kernels/internal/optimized/rvv_tensor_utils.h"
 #include "tflite/kernels/internal/optimized/optimized_ops_utils.h"
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
@@ -6512,7 +6513,7 @@ inline void ResizeNearestNeighbor(
         TFLITE_DCHECK_LT(x * input_width, output_width + in_x * output_width);
         TFLITE_DCHECK_GE(x * input_width, in_x * output_width);
         const uint8_t* x_input_ptr = y_input_ptr + in_x * col_offset;
-        memcpy(output_ptr, x_input_ptr, depth);
+        rvv_ops::CopyVector(x_input_ptr, output_ptr, depth);
         output_ptr += depth;
       }
     }

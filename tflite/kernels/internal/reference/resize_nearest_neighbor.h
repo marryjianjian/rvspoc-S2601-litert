@@ -19,6 +19,7 @@ limitations under the License.
 #include <cmath>
 
 #include "tflite/kernels/internal/cppmath.h"
+#include "tflite/kernels/internal/optimized/rvv_tensor_utils.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {
@@ -88,7 +89,7 @@ inline void ResizeNearestNeighbor(
                                           op_params.align_corners,
                                           op_params.half_pixel_centers);
         const T* x_input_ptr = y_input_ptr + in_x * col_offset;
-        memcpy(output_ptr, x_input_ptr, depth * sizeof(T));
+        rvv_ops::CopyVector(x_input_ptr, output_ptr, depth);
         output_ptr += depth;
       }
     }

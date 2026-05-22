@@ -214,6 +214,7 @@ cc_library(
         "optimized/optimized_ops.h",
         "optimized/optimized_ops_utils.h",
         "optimized/rvv_ops.h",
+        "optimized/rvv_tensor_utils.h",
         "optimized/reduce.h",
         "optimized/resize_bilinear.h",
         "optimized/sparse_ops/fully_connected.h",

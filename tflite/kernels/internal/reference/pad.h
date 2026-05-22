@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <vector>
 
+#include "tflite/kernels/internal/optimized/rvv_tensor_utils.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {
@@ -86,27 +87,31 @@ inline void PadImpl(const tflite::PadParams& op_params,
 
   const T pad_value = *pad_value_ptr;
 
+  const int input_depth = output_depth - left_d_padding - right_d_padding;
   const T* in_ptr = input_data;
   T* out_ptr = output_data;
   for (int out_b = 0; out_b < output_batch; ++out_b) {
     for (int out_p = 0; out_p < output_plane; ++out_p) {
       for (int out_h = 0; out_h < output_height; ++out_h) {
         for (int out_w = 0; out_w < output_width; ++out_w) {
-          for (int out_d = 0; out_d < output_depth; ++out_d) {
-            if (out_b < left_b_padding ||
-                out_b >= output_batch - right_b_padding ||
-                out_p < left_p_padding ||
-                out_p >= output_plane - right_p_padding ||
-                out_h < left_h_padding ||
-                out_h >= output_height - right_h_padding ||
-                out_w < left_w_padding ||
-                out_w >= output_width - right_w_padding ||
-                out_d < left_d_padding ||
-                out_d >= output_depth - right_d_padding) {
-              *out_ptr++ = pad_value;
-            } else {
-              *out_ptr++ = *in_ptr++;
-            }
+          if (out_b < left_b_padding ||
+              out_b >= output_batch - right_b_padding ||
+              out_p < left_p_padding ||
+              out_p >= output_plane - right_p_padding ||
+              out_h < left_h_padding ||
+              out_h >= output_height - right_h_padding ||
+              out_w < left_w_padding ||
+              out_w >= output_width - right_w_padding) {
+            rvv_ops::FillVector(out_ptr, output_depth, pad_value);
+            out_ptr += output_depth;
+          } else {
+            rvv_ops::FillVector(out_ptr, left_d_padding, pad_value);
+            out_ptr += left_d_padding;
+            rvv_ops::CopyVector(in_ptr, out_ptr, input_depth);
+            in_ptr += input_depth;
+            out_ptr += input_depth;
+            rvv_ops::FillVector(out_ptr, right_d_padding, pad_value);
+            out_ptr += right_d_padding;
           }
         }
       }

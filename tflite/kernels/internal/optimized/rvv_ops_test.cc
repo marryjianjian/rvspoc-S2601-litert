@@ -358,6 +358,11 @@ std::vector<int> Int8M1VectorLengths() {
       static_cast<int>(__riscv_vsetvlmax_e8m1()));
 }
 
+std::vector<int> UInt8M8VectorLengths() {
+  return VectorLengthsAroundVlmax(
+      static_cast<int>(__riscv_vsetvlmax_e8m8()));
+}
+
 std::vector<int> Int16M2VectorLengths() {
   return VectorLengthsAroundVlmax(
       static_cast<int>(__riscv_vsetvlmax_e16m2()));
@@ -2344,6 +2349,179 @@ TEST(RvvOpsTest, LstmSub1VectorMatchesPortableAcrossVectorBoundaries) {
     }
     EXPECT_THAT(actual_i16, ElementsAreArray(expected_i16))
         << "int16 size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, ResizeNearestNeighborUint8MatchesScalarAcrossVectorBoundaries) {
+  ResizeNearestNeighborParams params = {};
+  params.align_corners = false;
+  params.half_pixel_centers = false;
+
+  for (int depth : UInt8M8VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    constexpr int kBatch = 2;
+    constexpr int kInputHeight = 3;
+    constexpr int kInputWidth = 4;
+    constexpr int kOutputHeight = 5;
+    constexpr int kOutputWidth = 7;
+    const RuntimeShape input_shape(
+        {kBatch, kInputHeight, kInputWidth, depth});
+    const RuntimeShape output_size_shape({2});
+    const int32_t output_size_data[2] = {kOutputHeight, kOutputWidth};
+    const RuntimeShape output_shape(
+        {kBatch, kOutputHeight, kOutputWidth, depth});
+    const std::vector<uint8_t> input =
+        MakeUint8Input(input_shape.FlatSize(), 19);
+    std::vector<uint8_t> actual(output_shape.FlatSize());
+    std::vector<uint8_t> expected(output_shape.FlatSize());
+
+    optimized_ops::ResizeNearestNeighbor(
+        params, input_shape, input.data(), output_size_shape, output_size_data,
+        output_shape, actual.data());
+    int out = 0;
+    for (int b = 0; b < kBatch; ++b) {
+      for (int y = 0; y < kOutputHeight; ++y) {
+        const int in_y = std::min(
+            static_cast<int>(std::floor(y * (static_cast<float>(kInputHeight) /
+                                             kOutputHeight))),
+            kInputHeight - 1);
+        for (int x = 0; x < kOutputWidth; ++x) {
+          const int in_x = std::min(
+              static_cast<int>(std::floor(
+                  x * (static_cast<float>(kInputWidth) / kOutputWidth))),
+              kInputWidth - 1);
+          const int in = ((b * kInputHeight + in_y) * kInputWidth + in_x) *
+                         depth;
+          for (int c = 0; c < depth; ++c) {
+            expected[out++] = input[in + c];
+          }
+        }
+      }
+    }
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest, ConcatenationFloatMatchesScalarAcrossVectorBoundaries) {
+  for (int inner_size : Float32M4VectorLengths()) {
+    if (inner_size == 0) {
+      continue;
+    }
+    constexpr int kOuter = 3;
+    const RuntimeShape input0_shape({kOuter, 2, inner_size});
+    const RuntimeShape input1_shape({kOuter, 3, inner_size});
+    const RuntimeShape output_shape({kOuter, 5, inner_size});
+    const std::vector<float> input0 = MakeInput(input0_shape.FlatSize(), 0.25f);
+    const std::vector<float> input1 = MakeInput(input1_shape.FlatSize(), -1.0f);
+    const RuntimeShape* input_shapes[2] = {&input0_shape, &input1_shape};
+    const float* input_data[2] = {input0.data(), input1.data()};
+    ConcatenationParams params = {};
+    params.axis = 1;
+    params.inputs_count = 2;
+    std::vector<float> actual(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    reference_ops::Concatenation(params, input_shapes, input_data,
+                                 output_shape, actual.data());
+    int out = 0;
+    for (int outer = 0; outer < kOuter; ++outer) {
+      const int input0_base = outer * 2 * inner_size;
+      for (int i = 0; i < 2 * inner_size; ++i) {
+        expected[out++] = input0[input0_base + i];
+      }
+      const int input1_base = outer * 3 * inner_size;
+      for (int i = 0; i < 3 * inner_size; ++i) {
+        expected[out++] = input1[input1_base + i];
+      }
+    }
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
+        << "inner_size=" << inner_size;
+  }
+}
+
+TEST(RvvOpsTest, PadInt8MatchesScalarAcrossVectorBoundaries) {
+  for (int input_depth : Int8M1VectorLengths()) {
+    if (input_depth == 0) {
+      continue;
+    }
+    PadParams params = {};
+    const int left_padding[5] = {1, 0, 1, 2, 3};
+    const int right_padding[5] = {0, 1, 2, 1, 4};
+    params.left_padding_count = 5;
+    params.right_padding_count = 5;
+    std::copy(left_padding, left_padding + 5, params.left_padding);
+    std::copy(right_padding, right_padding + 5, params.right_padding);
+    const RuntimeShape input_shape({2, 2, 3, 4, input_depth});
+    const RuntimeShape output_shape(
+        {3, 3, 6, 7, input_depth + left_padding[4] + right_padding[4]});
+    const int8_t pad_value = -9;
+    const std::vector<int8_t> input =
+        MakeInt8Input(input_shape.FlatSize(), 31);
+    std::vector<int8_t> actual(output_shape.FlatSize());
+    std::vector<int8_t> expected(output_shape.FlatSize(), pad_value);
+
+    reference_ops::Pad(params, input_shape, input.data(), &pad_value,
+                       output_shape, actual.data());
+    for (int b = 0; b < input_shape.Dims(0); ++b) {
+      for (int p = 0; p < input_shape.Dims(1); ++p) {
+        for (int h = 0; h < input_shape.Dims(2); ++h) {
+          for (int w = 0; w < input_shape.Dims(3); ++w) {
+            for (int d = 0; d < input_shape.Dims(4); ++d) {
+              expected[Offset(output_shape, b + left_padding[0],
+                              p + left_padding[1], h + left_padding[2],
+                              w + left_padding[3], d + left_padding[4])] =
+                  input[Offset(input_shape, b, p, h, w, d)];
+            }
+          }
+        }
+      }
+    }
+
+    EXPECT_THAT(actual, ElementsAreArray(expected))
+        << "input_depth=" << input_depth;
+  }
+}
+
+TEST(RvvOpsTest, GatherFloatMatchesScalarAcrossVectorBoundaries) {
+  GatherParams params = {};
+  params.axis = 1;
+  params.batch_dims = 0;
+
+  for (int inner_size : Float32M4VectorLengths()) {
+    if (inner_size == 0) {
+      continue;
+    }
+    constexpr int kOuter = 2;
+    constexpr int kAxis = 5;
+    const RuntimeShape input_shape({kOuter, kAxis, inner_size});
+    const RuntimeShape coords_shape({6});
+    const RuntimeShape output_shape({kOuter, coords_shape.FlatSize(),
+                                     inner_size});
+    const std::vector<float> input = MakeInput(input_shape.FlatSize(), 0.75f);
+    const std::vector<int32_t> coords = {4, 0, 3, 1, 1, 2};
+    std::vector<float> actual(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    ASSERT_EQ(reference_ops::Gather(params, input_shape, input.data(),
+                                    coords_shape, coords.data(), output_shape,
+                                    actual.data()),
+              kTfLiteOk);
+    int out = 0;
+    for (int outer = 0; outer < kOuter; ++outer) {
+      for (int coord : coords) {
+        const int in = (outer * kAxis + coord) * inner_size;
+        for (int i = 0; i < inner_size; ++i) {
+          expected[out++] = input[in + i];
+        }
+      }
+    }
+
+    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
+        << "inner_size=" << inner_size;
   }
 }
 

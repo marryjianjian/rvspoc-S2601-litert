@@ -22,6 +22,7 @@ limitations under the License.
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/compatibility.h"
 #include "tflite/kernels/internal/cppmath.h"
+#include "tflite/kernels/internal/optimized/rvv_tensor_utils.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {
@@ -65,7 +66,7 @@ inline void Concatenation(const ConcatenationParams& params,
     for (int i = 0; i < inputs_count; ++i) {
       const int copy_size = input_shapes[i]->Dims(axis) * base_inner_size;
       const Scalar* input_ptr = input_data[i] + k * copy_size;
-      memcpy(output_ptr, input_ptr, copy_size * sizeof(Scalar));
+      rvv_ops::CopyVector(input_ptr, output_ptr, copy_size);
       output_ptr += copy_size;
     }
   }
@@ -191,7 +192,7 @@ inline void ConcatenationWithScaling(const ConcatenationParams& params,
       const uint8_t* input_ptr = input_data[i] + k * copy_size;
       if (input_zeropoint[i] == output_zeropoint &&
           input_scale[i] == output_scale) {
-        memcpy(output_ptr, input_ptr, copy_size);
+        rvv_ops::CopyVector(input_ptr, output_ptr, copy_size);
       } else {
         const float scale = input_scale[i] * inverse_output_scale;
         const float bias = -input_zeropoint[i] * scale;

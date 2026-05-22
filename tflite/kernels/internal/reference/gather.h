@@ -21,6 +21,7 @@ limitations under the License.
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/core/c/c_api_types.h"
 #include "tflite/kernels/internal/compatibility.h"
+#include "tflite/kernels/internal/optimized/rvv_tensor_utils.h"
 #include "tflite/kernels/internal/runtime_shape.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -106,8 +107,8 @@ inline TfLiteStatus Gather(const tflite::GatherParams& op_params,
             (((batch * outer_size) + outer) * coord_size + i) * inner_size;
         TFLITE_DCHECK(to_pos >= 0);
         TFLITE_DCHECK(to_pos + inner_size <= output_flat_size);
-        std::memcpy(&output_data[to_pos], &input_data[from_pos],
-                    sizeof(T) * inner_size);
+        rvv_ops::CopyVector(&input_data[from_pos], &output_data[to_pos],
+                            inner_size);
       }
     }
   }
