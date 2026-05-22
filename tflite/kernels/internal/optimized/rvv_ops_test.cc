@@ -51,8 +51,20 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/sub.h"
 #include "tflite/kernels/internal/types.h"
 #include "tflite/kernels/stablehlo_elementwise.h"
+#include "tflite/schema/schema_generated.h"
 
 namespace tflite {
+
+namespace ops {
+namespace builtin {
+TfLiteRegistration* Register_STABLEHLO_ADD();
+TfLiteRegistration* Register_STABLEHLO_MULTIPLY();
+TfLiteRegistration* Register_STABLEHLO_MAXIMUM();
+TfLiteRegistration* Register_STABLEHLO_MINIMUM();
+TfLiteRegistration* Register_STABLEHLO_AND();
+}  // namespace builtin
+}  // namespace ops
+
 namespace {
 
 #ifdef USE_RVV
@@ -60,6 +72,16 @@ namespace {
 using ::testing::ElementsAreArray;
 using ::testing::FloatNear;
 using ::testing::Pointwise;
+
+struct OneDimTfLiteIntArray {
+  int size;
+  int data[1];
+};
+
+struct TwoDimTfLiteIntArray {
+  int size;
+  int data[2];
+};
 
 float Clamp(float value, float min, float max) {
   return std::min(max, std::max(min, value));
@@ -74,12 +96,88 @@ std::vector<float> MakeInput(int size, float offset) {
   return values;
 }
 
+std::vector<float> MakeSpecialFloatInput(int size, float offset) {
+  std::vector<float> values = MakeInput(size, offset);
+  const float specials[] = {
+      0.0f,
+      -0.0f,
+      std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity(),
+      std::numeric_limits<float>::max(),
+      std::numeric_limits<float>::lowest(),
+      std::numeric_limits<float>::denorm_min(),
+      -std::numeric_limits<float>::denorm_min(),
+  };
+  const int count =
+      std::min(size, static_cast<int>(sizeof(specials) / sizeof(specials[0])));
+  for (int i = 0; i < count; ++i) {
+    values[i] = specials[i];
+  }
+  return values;
+}
+
+void MakeStablehloSpecialFloatInputs(int size, std::vector<float>* input1,
+                                     std::vector<float>* input2) {
+  *input1 = MakeInput(size, 0.5f);
+  *input2 = MakeInput(size, -1.25f);
+  const float lhs[] = {
+      0.0f,
+      -0.0f,
+      std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity(),
+      std::numeric_limits<float>::max(),
+      std::numeric_limits<float>::lowest(),
+      std::numeric_limits<float>::denorm_min(),
+      -std::numeric_limits<float>::denorm_min(),
+  };
+  const float rhs[] = {
+      -0.0f, 0.0f, 1.0f, 2.0f, -1.0f, 1.0f,
+      std::numeric_limits<float>::denorm_min(),
+      std::numeric_limits<float>::denorm_min(),
+  };
+  const int count = std::min(size, static_cast<int>(sizeof(lhs) / sizeof(lhs[0])));
+  for (int i = 0; i < count; ++i) {
+    (*input1)[i] = lhs[i];
+    (*input2)[i] = rhs[i];
+  }
+}
+
+void ExpectFloatNearOrSpecial(const std::vector<float>& actual,
+                              const std::vector<float>& expected) {
+  ASSERT_EQ(actual.size(), expected.size());
+  for (int i = 0; i < expected.size(); ++i) {
+    if (std::isnan(expected[i])) {
+      EXPECT_TRUE(std::isnan(actual[i])) << "i=" << i;
+    } else if (std::isinf(expected[i])) {
+      EXPECT_EQ(actual[i], expected[i]) << "i=" << i;
+    } else {
+      EXPECT_THAT(actual[i], FloatNear(expected[i], 1e-6f)) << "i=" << i;
+    }
+  }
+}
+
 std::vector<int8_t> MakeInt8Input(int size, int offset) {
   std::vector<int8_t> values(size);
   for (int i = 0; i < size; ++i) {
     values[i] = static_cast<int8_t>(((i * 37 + offset) % 255) - 127);
   }
   return values;
+}
+
+void MakeSpecialInt8Inputs(int size, std::vector<int8_t>* input1,
+                           std::vector<int8_t>* input2) {
+  *input1 = MakeInt8Input(size, 17);
+  *input2 = MakeInt8Input(size, 91);
+  const int8_t lhs[] = {
+      std::numeric_limits<int8_t>::min(), std::numeric_limits<int8_t>::max(),
+      -1, 0, 1, 64, -64, 127,
+  };
+  const int8_t rhs[] = {1, -1, 1, 0, 1, 1, 1, 0};
+  const int count = std::min(size, static_cast<int>(sizeof(lhs) / sizeof(lhs[0])));
+  for (int i = 0; i < count; ++i) {
+    (*input1)[i] = lhs[i];
+    (*input2)[i] = rhs[i];
+  }
 }
 
 std::vector<uint8_t> MakeUint8Input(int size, int offset) {
@@ -359,14 +457,46 @@ std::vector<int> Int8M1VectorLengths() {
       static_cast<int>(__riscv_vsetvlmax_e8m1()));
 }
 
+std::vector<int> Int8M4VectorLengths() {
+  return VectorLengthsAroundVlmax(
+      static_cast<int>(__riscv_vsetvlmax_e8m4()));
+}
+
+std::vector<int> Int8M8VectorLengths() {
+  return VectorLengthsAroundVlmax(
+      static_cast<int>(__riscv_vsetvlmax_e8m8()));
+}
+
 std::vector<int> UInt8M8VectorLengths() {
   return VectorLengthsAroundVlmax(
       static_cast<int>(__riscv_vsetvlmax_e8m8()));
 }
 
+std::vector<int> Int32M4VectorLengths() {
+  return VectorLengthsAroundVlmax(
+      static_cast<int>(__riscv_vsetvlmax_e32m4()));
+}
+
 std::vector<int> Int16M2VectorLengths() {
   return VectorLengthsAroundVlmax(
       static_cast<int>(__riscv_vsetvlmax_e16m2()));
+}
+
+template <typename T>
+std::vector<int> ElementLengthsAroundByteVlmax() {
+  std::vector<int> lengths;
+  for (int bytes : VectorLengthsAroundVlmax(
+           static_cast<int>(__riscv_vsetvlmax_e8m8()))) {
+    if (bytes == 0) {
+      lengths.push_back(0);
+    } else {
+      lengths.push_back((bytes + static_cast<int>(sizeof(T)) - 1) /
+                        static_cast<int>(sizeof(T)));
+    }
+  }
+  std::sort(lengths.begin(), lengths.end());
+  lengths.erase(std::unique(lengths.begin(), lengths.end()), lengths.end());
+  return lengths;
 }
 
 #endif  // USE_RVV
@@ -2407,7 +2537,7 @@ TEST(RvvOpsTest, ResizeNearestNeighborUint8MatchesScalarAcrossVectorBoundaries) 
 }
 
 TEST(RvvOpsTest, ConcatenationFloatMatchesScalarAcrossVectorBoundaries) {
-  for (int inner_size : Float32M4VectorLengths()) {
+  for (int inner_size : ElementLengthsAroundByteVlmax<float>()) {
     if (inner_size == 0) {
       continue;
     }
@@ -2415,8 +2545,10 @@ TEST(RvvOpsTest, ConcatenationFloatMatchesScalarAcrossVectorBoundaries) {
     const RuntimeShape input0_shape({kOuter, 2, inner_size});
     const RuntimeShape input1_shape({kOuter, 3, inner_size});
     const RuntimeShape output_shape({kOuter, 5, inner_size});
-    const std::vector<float> input0 = MakeInput(input0_shape.FlatSize(), 0.25f);
-    const std::vector<float> input1 = MakeInput(input1_shape.FlatSize(), -1.0f);
+    const std::vector<float> input0 =
+        MakeSpecialFloatInput(input0_shape.FlatSize(), 0.25f);
+    const std::vector<float> input1 =
+        MakeSpecialFloatInput(input1_shape.FlatSize(), -1.0f);
     const RuntimeShape* input_shapes[2] = {&input0_shape, &input1_shape};
     const float* input_data[2] = {input0.data(), input1.data()};
     ConcatenationParams params = {};
@@ -2439,13 +2571,12 @@ TEST(RvvOpsTest, ConcatenationFloatMatchesScalarAcrossVectorBoundaries) {
       }
     }
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
-        << "inner_size=" << inner_size;
+    ExpectFloatNearOrSpecial(actual, expected);
   }
 }
 
 TEST(RvvOpsTest, PadInt8MatchesScalarAcrossVectorBoundaries) {
-  for (int input_depth : Int8M1VectorLengths()) {
+  for (int input_depth : Int8M8VectorLengths()) {
     if (input_depth == 0) {
       continue;
     }
@@ -2492,7 +2623,7 @@ TEST(RvvOpsTest, GatherFloatMatchesScalarAcrossVectorBoundaries) {
   params.axis = 1;
   params.batch_dims = 0;
 
-  for (int inner_size : Float32M4VectorLengths()) {
+  for (int inner_size : ElementLengthsAroundByteVlmax<float>()) {
     if (inner_size == 0) {
       continue;
     }
@@ -2502,7 +2633,8 @@ TEST(RvvOpsTest, GatherFloatMatchesScalarAcrossVectorBoundaries) {
     const RuntimeShape coords_shape({6});
     const RuntimeShape output_shape({kOuter, coords_shape.FlatSize(),
                                      inner_size});
-    const std::vector<float> input = MakeInput(input_shape.FlatSize(), 0.75f);
+    const std::vector<float> input =
+        MakeSpecialFloatInput(input_shape.FlatSize(), 0.75f);
     const std::vector<int32_t> coords = {4, 0, 3, 1, 1, 2};
     std::vector<float> actual(output_shape.FlatSize());
     std::vector<float> expected(output_shape.FlatSize());
@@ -2521,15 +2653,41 @@ TEST(RvvOpsTest, GatherFloatMatchesScalarAcrossVectorBoundaries) {
       }
     }
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
-        << "inner_size=" << inner_size;
+    ExpectFloatNearOrSpecial(actual, expected);
   }
 }
 
+class StablehloElementwiseOpModel : public SingleOpModel {
+ public:
+  StablehloElementwiseOpModel(BuiltinOperator op, TensorType type,
+                              const std::vector<int>& shape) {
+    input1_ = AddInput({type, shape});
+    input2_ = AddInput({type, shape});
+    output_ = AddOutput({type, {}});
+    SetBuiltinOp(op, BuiltinOptions_NONE, 0);
+    SetBypassDefaultDelegates();
+    BuildInterpreter({GetShape(input1_), GetShape(input2_)});
+  }
+
+  int input1() const { return input1_; }
+  int input2() const { return input2_; }
+
+  template <typename T>
+  std::vector<T> GetOutput() {
+    return ExtractVector<T>(output_);
+  }
+
+ private:
+  int input1_;
+  int input2_;
+  int output_;
+};
+
 TEST(RvvOpsTest, StablehloFloatElementwiseMatchesScalarAcrossVectorBoundaries) {
   for (int size : Float32M4VectorLengths()) {
-    const std::vector<float> input1 = MakeInput(size, 0.5f);
-    const std::vector<float> input2 = MakeInput(size, -1.25f);
+    std::vector<float> input1;
+    std::vector<float> input2;
+    MakeStablehloSpecialFloatInputs(size, &input1, &input2);
     std::vector<float> actual(size);
     std::vector<float> expected(size);
 
@@ -2537,40 +2695,85 @@ TEST(RvvOpsTest, StablehloFloatElementwiseMatchesScalarAcrossVectorBoundaries) {
                 ops::builtin::ComputationType::kAdd>(
         input1.data(), input2.data(), actual.data(), size));
     for (int i = 0; i < size; ++i) expected[i] = input1[i] + input2[i];
-    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
-        << "add size=" << size;
+    ExpectFloatNearOrSpecial(actual, expected);
 
     ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
                 ops::builtin::ComputationType::kMul>(
         input1.data(), input2.data(), actual.data(), size));
     for (int i = 0; i < size; ++i) expected[i] = input1[i] * input2[i];
-    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
-        << "mul size=" << size;
+    ExpectFloatNearOrSpecial(actual, expected);
 
     ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
                 ops::builtin::ComputationType::kMax>(
         input1.data(), input2.data(), actual.data(), size));
     for (int i = 0; i < size; ++i) expected[i] = std::max(input1[i], input2[i]);
-    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
-        << "max size=" << size;
+    ExpectFloatNearOrSpecial(actual, expected);
 
     ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
                 ops::builtin::ComputationType::kMin>(
         input1.data(), input2.data(), actual.data(), size));
     for (int i = 0; i < size; ++i) expected[i] = std::min(input1[i], input2[i]);
-    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
-        << "min size=" << size;
+    ExpectFloatNearOrSpecial(actual, expected);
+  }
+}
+
+TEST(RvvOpsTest, StablehloFloatKernelEntryMatchesScalarAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    if (size == 0) {
+      continue;
+    }
+    std::vector<float> input1;
+    std::vector<float> input2;
+    MakeStablehloSpecialFloatInputs(size, &input1, &input2);
+
+    const struct {
+      BuiltinOperator op;
+      ops::builtin::ComputationType computation;
+    } test_cases[] = {
+        {BuiltinOperator_STABLEHLO_ADD, ops::builtin::ComputationType::kAdd},
+        {BuiltinOperator_STABLEHLO_MULTIPLY,
+         ops::builtin::ComputationType::kMul},
+        {BuiltinOperator_STABLEHLO_MAXIMUM,
+         ops::builtin::ComputationType::kMax},
+        {BuiltinOperator_STABLEHLO_MINIMUM,
+         ops::builtin::ComputationType::kMin},
+    };
+
+    for (const auto& test_case : test_cases) {
+      StablehloElementwiseOpModel model(test_case.op, TensorType_FLOAT32,
+                                        {size});
+      model.PopulateTensor<float>(model.input1(), input1);
+      model.PopulateTensor<float>(model.input2(), input2);
+      ASSERT_EQ(model.Invoke(), kTfLiteOk);
+      std::vector<float> expected(size);
+      for (int i = 0; i < size; ++i) {
+        switch (test_case.computation) {
+          case ops::builtin::ComputationType::kAdd:
+            expected[i] = input1[i] + input2[i];
+            break;
+          case ops::builtin::ComputationType::kMul:
+            expected[i] = input1[i] * input2[i];
+            break;
+          case ops::builtin::ComputationType::kMax:
+            expected[i] = std::max(input1[i], input2[i]);
+            break;
+          case ops::builtin::ComputationType::kMin:
+            expected[i] = std::min(input1[i], input2[i]);
+            break;
+          default:
+            TFL_UNREACHABLE();
+        }
+      }
+      ExpectFloatNearOrSpecial(model.GetOutput<float>(), expected);
+    }
   }
 }
 
 TEST(RvvOpsTest, StablehloInt8ElementwiseMatchesScalarAcrossVectorBoundaries) {
-  for (int size : Int8M1VectorLengths()) {
-    std::vector<int8_t> input1(size);
-    std::vector<int8_t> input2(size);
-    for (int i = 0; i < size; ++i) {
-      input1[i] = static_cast<int8_t>((i % 17) - 8);
-      input2[i] = static_cast<int8_t>((i % 11) - 5);
-    }
+  for (int size : Int8M4VectorLengths()) {
+    std::vector<int8_t> input1;
+    std::vector<int8_t> input2;
+    MakeSpecialInt8Inputs(size, &input1, &input2);
     std::vector<int8_t> actual(size);
     std::vector<int8_t> expected(size);
 
@@ -2598,10 +2801,65 @@ TEST(RvvOpsTest, StablehloInt8ElementwiseMatchesScalarAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, StablehloInt8KernelEntryMatchesScalarAcrossVectorBoundaries) {
+  for (int size : Int8M4VectorLengths()) {
+    if (size == 0) {
+      continue;
+    }
+    std::vector<int8_t> input1;
+    std::vector<int8_t> input2;
+    MakeSpecialInt8Inputs(size, &input1, &input2);
+
+    const struct {
+      BuiltinOperator op;
+      ops::builtin::ComputationType computation;
+    } test_cases[] = {
+        {BuiltinOperator_STABLEHLO_ADD, ops::builtin::ComputationType::kAdd},
+        {BuiltinOperator_STABLEHLO_MULTIPLY,
+         ops::builtin::ComputationType::kMul},
+        {BuiltinOperator_STABLEHLO_AND, ops::builtin::ComputationType::kAnd},
+    };
+
+    for (const auto& test_case : test_cases) {
+      StablehloElementwiseOpModel model(test_case.op, TensorType_INT8, {size});
+      model.PopulateTensor<int8_t>(model.input1(), input1);
+      model.PopulateTensor<int8_t>(model.input2(), input2);
+      ASSERT_EQ(model.Invoke(), kTfLiteOk);
+      std::vector<int8_t> expected(size);
+      for (int i = 0; i < size; ++i) {
+        switch (test_case.computation) {
+          case ops::builtin::ComputationType::kAdd:
+            expected[i] = static_cast<int8_t>(input1[i] + input2[i]);
+            break;
+          case ops::builtin::ComputationType::kMul:
+            expected[i] = static_cast<int8_t>(input1[i] * input2[i]);
+            break;
+          case ops::builtin::ComputationType::kAnd:
+            expected[i] = input1[i] & input2[i];
+            break;
+          default:
+            TFL_UNREACHABLE();
+        }
+      }
+      EXPECT_THAT(model.GetOutput<int8_t>(), ElementsAreArray(expected));
+    }
+  }
+}
+
 TEST(RvvOpsTest, StablehloInt32MinMaxMatchesScalarAcrossVectorBoundaries) {
-  for (int size : Float32M4VectorLengths()) {
-    const std::vector<int32_t> input1 = MakeInt32Input(size, 19);
-    const std::vector<int32_t> input2 = MakeInt32Input(size, 701);
+  for (int size : Int32M4VectorLengths()) {
+    std::vector<int32_t> input1 = MakeInt32Input(size, 19);
+    std::vector<int32_t> input2 = MakeInt32Input(size, 701);
+    if (size >= 4) {
+      input1[0] = std::numeric_limits<int32_t>::min();
+      input2[0] = std::numeric_limits<int32_t>::max();
+      input1[1] = std::numeric_limits<int32_t>::max();
+      input2[1] = std::numeric_limits<int32_t>::min();
+      input1[2] = 0;
+      input2[2] = -1;
+      input1[3] = -1;
+      input2[3] = 0;
+    }
     std::vector<int32_t> actual(size);
     std::vector<int32_t> expected(size);
 

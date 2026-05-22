@@ -1361,6 +1361,7 @@ cc_test(
         ":portable_tensor_utils",
         ":tensor_utils_no_eigen",
         "//tflite/kernels:stablehlo_elementwise",
+        "//tflite/schema:schema_fbs",
         "@com_google_googletest//:gtest_main",
     ],
 )
