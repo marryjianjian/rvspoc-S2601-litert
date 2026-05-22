@@ -16,10 +16,12 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_STABLEHLO_ELEMENTWISE_H_
 
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include "Eigen/Core"  // from @eigen_archive
 #include "tflite/core/c/common.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/runtime_shape.h"
 #include "tflite/kernels/internal/tensor_ctypes.h"
 #include "tflite/kernels/internal/types.h"
@@ -75,6 +77,157 @@ inline DataType ApplyComputation(DataType input1, DataType input2) {
   TFL_UNREACHABLE();
 }
 
+#ifdef USE_RVV
+template <ComputationType computation_type>
+inline bool RvvStablehloElementwiseFloat(const float* input1,
+                                         const float* input2, float* output,
+                                         int size) {
+  if constexpr (computation_type != ComputationType::kAdd &&
+                computation_type != ComputationType::kMax &&
+                computation_type != ComputationType::kMin &&
+                computation_type != ComputationType::kMul) {
+    return false;
+  }
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vfloat32m4_t lhs = __riscv_vle32_v_f32m4(input1 + i, vl);
+    const vfloat32m4_t rhs = __riscv_vle32_v_f32m4(input2 + i, vl);
+    vfloat32m4_t result;
+    if constexpr (computation_type == ComputationType::kAdd) {
+      result = __riscv_vfadd_vv_f32m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMax) {
+      result = __riscv_vfmax_vv_f32m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMin) {
+      result = __riscv_vfmin_vv_f32m4(lhs, rhs, vl);
+    } else {
+      result = __riscv_vfmul_vv_f32m4(lhs, rhs, vl);
+    }
+    __riscv_vse32_v_f32m4(output + i, result, vl);
+    i += vl;
+  }
+  return true;
+}
+
+template <ComputationType computation_type>
+inline bool RvvStablehloElementwiseInt32(const int32_t* input1,
+                                         const int32_t* input2,
+                                         int32_t* output, int size) {
+  if constexpr (computation_type != ComputationType::kAdd &&
+                computation_type != ComputationType::kMax &&
+                computation_type != ComputationType::kMin &&
+                computation_type != ComputationType::kMul &&
+                computation_type != ComputationType::kAnd) {
+    return false;
+  }
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vint32m4_t lhs = __riscv_vle32_v_i32m4(input1 + i, vl);
+    const vint32m4_t rhs = __riscv_vle32_v_i32m4(input2 + i, vl);
+    vint32m4_t result;
+    if constexpr (computation_type == ComputationType::kAdd) {
+      result = __riscv_vadd_vv_i32m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMax) {
+      result = __riscv_vmax_vv_i32m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMin) {
+      result = __riscv_vmin_vv_i32m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMul) {
+      result = __riscv_vmul_vv_i32m4(lhs, rhs, vl);
+    } else {
+      result = __riscv_vand_vv_i32m4(lhs, rhs, vl);
+    }
+    __riscv_vse32_v_i32m4(output + i, result, vl);
+    i += vl;
+  }
+  return true;
+}
+
+template <ComputationType computation_type>
+inline bool RvvStablehloElementwiseInt16(const int16_t* input1,
+                                         const int16_t* input2,
+                                         int16_t* output, int size) {
+  if constexpr (computation_type != ComputationType::kAdd &&
+                computation_type != ComputationType::kMax &&
+                computation_type != ComputationType::kMin &&
+                computation_type != ComputationType::kMul &&
+                computation_type != ComputationType::kAnd) {
+    return false;
+  }
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e16m4(size - i);
+    const vint16m4_t lhs = __riscv_vle16_v_i16m4(input1 + i, vl);
+    const vint16m4_t rhs = __riscv_vle16_v_i16m4(input2 + i, vl);
+    vint16m4_t result;
+    if constexpr (computation_type == ComputationType::kAdd) {
+      result = __riscv_vadd_vv_i16m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMax) {
+      result = __riscv_vmax_vv_i16m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMin) {
+      result = __riscv_vmin_vv_i16m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMul) {
+      result = __riscv_vmul_vv_i16m4(lhs, rhs, vl);
+    } else {
+      result = __riscv_vand_vv_i16m4(lhs, rhs, vl);
+    }
+    __riscv_vse16_v_i16m4(output + i, result, vl);
+    i += vl;
+  }
+  return true;
+}
+
+template <ComputationType computation_type>
+inline bool RvvStablehloElementwiseInt8(const int8_t* input1,
+                                        const int8_t* input2, int8_t* output,
+                                        int size) {
+  if constexpr (computation_type != ComputationType::kAdd &&
+                computation_type != ComputationType::kMax &&
+                computation_type != ComputationType::kMin &&
+                computation_type != ComputationType::kMul &&
+                computation_type != ComputationType::kAnd) {
+    return false;
+  }
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m4(size - i);
+    const vint8m4_t lhs = __riscv_vle8_v_i8m4(input1 + i, vl);
+    const vint8m4_t rhs = __riscv_vle8_v_i8m4(input2 + i, vl);
+    vint8m4_t result;
+    if constexpr (computation_type == ComputationType::kAdd) {
+      result = __riscv_vadd_vv_i8m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMax) {
+      result = __riscv_vmax_vv_i8m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMin) {
+      result = __riscv_vmin_vv_i8m4(lhs, rhs, vl);
+    } else if constexpr (computation_type == ComputationType::kMul) {
+      result = __riscv_vmul_vv_i8m4(lhs, rhs, vl);
+    } else {
+      result = __riscv_vand_vv_i8m4(lhs, rhs, vl);
+    }
+    __riscv_vse8_v_i8m4(output + i, result, vl);
+    i += vl;
+  }
+  return true;
+}
+
+template <ComputationType computation_type, typename DataType>
+inline bool RvvStablehloElementwiseFlat(const DataType* input1,
+                                        const DataType* input2,
+                                        DataType* output, int size) {
+  if constexpr (std::is_same<DataType, float>::value) {
+    return RvvStablehloElementwiseFloat<computation_type>(input1, input2,
+                                                         output, size);
+  } else if constexpr (std::is_same<DataType, int32_t>::value) {
+    return RvvStablehloElementwiseInt32<computation_type>(input1, input2,
+                                                         output, size);
+  } else if constexpr (std::is_same<DataType, int16_t>::value) {
+    return RvvStablehloElementwiseInt16<computation_type>(input1, input2,
+                                                         output, size);
+  } else if constexpr (std::is_same<DataType, int8_t>::value) {
+    return RvvStablehloElementwiseInt8<computation_type>(input1, input2,
+                                                        output, size);
+  }
+  return false;
+}
+#endif  // USE_RVV
+
 // Evaluates this node given the type of the elements in the output_tensor
 // and the type of the elements in the input/updates vector.
 template <ComputationType computation_type, typename DataType>
@@ -94,6 +247,13 @@ TfLiteStatus EvalWithType(TfLiteContext* context, TfLiteNode* node) {
   TF_LITE_ENSURE_OK(context,
                     GetOutputSafe(context, node, kOutputTensor, &output));
   DataType* output_data = GetTensorData<DataType>(output);
+
+#ifdef USE_RVV
+  if (RvvStablehloElementwiseFlat<computation_type>(
+          input_data1, input_data2, output_data, input_shape.FlatSize())) {
+    return TfLiteStatus::kTfLiteOk;
+  }
+#endif  // USE_RVV
 
   int input_rank = input_tensor1->dims->size;
   std::vector<int64_t> index(input_rank, 0);

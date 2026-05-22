@@ -1360,6 +1360,7 @@ cc_test(
         ":optimized_base",
         ":portable_tensor_utils",
         ":tensor_utils_no_eigen",
+        "//tflite/kernels:stablehlo_elementwise",
         "@com_google_googletest//:gtest_main",
     ],
 )

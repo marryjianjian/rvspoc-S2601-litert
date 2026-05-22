@@ -462,6 +462,7 @@ cc_library(
     deps = [
         ":kernel_util",
         "//tflite/core/c:common",
+        "//tflite/kernels/internal:cpu_check",
         "//tflite/kernels/internal:runtime_shape",
         "//tflite/kernels/internal:tensor_ctypes",
         "//tflite/kernels/internal:types",

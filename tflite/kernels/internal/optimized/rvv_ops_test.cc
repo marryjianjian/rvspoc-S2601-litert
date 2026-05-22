@@ -50,6 +50,7 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/svdf.h"
 #include "tflite/kernels/internal/reference/sub.h"
 #include "tflite/kernels/internal/types.h"
+#include "tflite/kernels/stablehlo_elementwise.h"
 
 namespace tflite {
 namespace {
@@ -2522,6 +2523,99 @@ TEST(RvvOpsTest, GatherFloatMatchesScalarAcrossVectorBoundaries) {
 
     EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
         << "inner_size=" << inner_size;
+  }
+}
+
+TEST(RvvOpsTest, StablehloFloatElementwiseMatchesScalarAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    const std::vector<float> input1 = MakeInput(size, 0.5f);
+    const std::vector<float> input2 = MakeInput(size, -1.25f);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
+                ops::builtin::ComputationType::kAdd>(
+        input1.data(), input2.data(), actual.data(), size));
+    for (int i = 0; i < size; ++i) expected[i] = input1[i] + input2[i];
+    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
+        << "add size=" << size;
+
+    ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
+                ops::builtin::ComputationType::kMul>(
+        input1.data(), input2.data(), actual.data(), size));
+    for (int i = 0; i < size; ++i) expected[i] = input1[i] * input2[i];
+    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
+        << "mul size=" << size;
+
+    ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
+                ops::builtin::ComputationType::kMax>(
+        input1.data(), input2.data(), actual.data(), size));
+    for (int i = 0; i < size; ++i) expected[i] = std::max(input1[i], input2[i]);
+    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
+        << "max size=" << size;
+
+    ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
+                ops::builtin::ComputationType::kMin>(
+        input1.data(), input2.data(), actual.data(), size));
+    for (int i = 0; i < size; ++i) expected[i] = std::min(input1[i], input2[i]);
+    EXPECT_THAT(actual, Pointwise(FloatNear(0.0f), expected))
+        << "min size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, StablehloInt8ElementwiseMatchesScalarAcrossVectorBoundaries) {
+  for (int size : Int8M1VectorLengths()) {
+    std::vector<int8_t> input1(size);
+    std::vector<int8_t> input2(size);
+    for (int i = 0; i < size; ++i) {
+      input1[i] = static_cast<int8_t>((i % 17) - 8);
+      input2[i] = static_cast<int8_t>((i % 11) - 5);
+    }
+    std::vector<int8_t> actual(size);
+    std::vector<int8_t> expected(size);
+
+    ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
+                ops::builtin::ComputationType::kAdd>(
+        input1.data(), input2.data(), actual.data(), size));
+    for (int i = 0; i < size; ++i) {
+      expected[i] = static_cast<int8_t>(input1[i] + input2[i]);
+    }
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "add size=" << size;
+
+    ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
+                ops::builtin::ComputationType::kMul>(
+        input1.data(), input2.data(), actual.data(), size));
+    for (int i = 0; i < size; ++i) {
+      expected[i] = static_cast<int8_t>(input1[i] * input2[i]);
+    }
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "mul size=" << size;
+
+    ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
+                ops::builtin::ComputationType::kAnd>(
+        input1.data(), input2.data(), actual.data(), size));
+    for (int i = 0; i < size; ++i) expected[i] = input1[i] & input2[i];
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "and size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, StablehloInt32MinMaxMatchesScalarAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    const std::vector<int32_t> input1 = MakeInt32Input(size, 19);
+    const std::vector<int32_t> input2 = MakeInt32Input(size, 701);
+    std::vector<int32_t> actual(size);
+    std::vector<int32_t> expected(size);
+
+    ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
+                ops::builtin::ComputationType::kMax>(
+        input1.data(), input2.data(), actual.data(), size));
+    for (int i = 0; i < size; ++i) expected[i] = std::max(input1[i], input2[i]);
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "max size=" << size;
+
+    ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
+                ops::builtin::ComputationType::kMin>(
+        input1.data(), input2.data(), actual.data(), size));
+    for (int i = 0; i < size; ++i) expected[i] = std::min(input1[i], input2[i]);
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "min size=" << size;
   }
 }
 
