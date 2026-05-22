@@ -18,11 +18,13 @@ limitations under the License.
 #include <stdint.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <limits>
 
 #include "tflite/core/c/builtin_op_data.h"
 #include "tflite/core/c/common.h"
 #include "tflite/kernels/internal/common.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/tensor_ctypes.h"
 #include "tflite/kernels/internal/tensor_utils.h"
 #include "tflite/kernels/internal/types.h"
@@ -34,6 +36,94 @@ limitations under the License.
 namespace tflite {
 namespace reference_ops {
 
+#if defined(USE_RVV)
+inline float RvvSvdfDotProductFloat(const float* lhs, const float* rhs,
+                                    int size) {
+  float result = 0.0f;
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vfloat32m4_t lhs_values = __riscv_vle32_v_f32m4(lhs + i, vl);
+    const vfloat32m4_t rhs_values = __riscv_vle32_v_f32m4(rhs + i, vl);
+    const vfloat32m4_t product =
+        __riscv_vfmul_vv_f32m4(lhs_values, rhs_values, vl);
+    vfloat32m1_t scalar = __riscv_vfmv_v_f_f32m1(0.0f, 1);
+    scalar = __riscv_vfredusum_vs_f32m4_f32m1(product, scalar, vl);
+    result += __riscv_vfmv_f_s_f32m1_f32(scalar);
+    i += vl;
+  }
+  return result;
+}
+
+inline int32_t RvvSvdfDotProductInt16(const int16_t* lhs, const int16_t* rhs,
+                                      int size) {
+  vint32m1_t reduced = __riscv_vmv_v_x_i32m1(0, 1);
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e16m2(size - i);
+    const vint16m2_t lhs_values = __riscv_vle16_v_i16m2(lhs + i, vl);
+    const vint16m2_t rhs_values = __riscv_vle16_v_i16m2(rhs + i, vl);
+    const vint32m4_t product =
+        __riscv_vwmul_vv_i32m4(lhs_values, rhs_values, vl);
+    reduced = __riscv_vredsum_vs_i32m4_i32m1(product, reduced, vl);
+    i += vl;
+  }
+  return __riscv_vmv_x_s_i32m1_i32(reduced);
+}
+
+inline int32_t RvvSvdfDotProductInt8WithInputZeroPoint(
+    const int8_t* weights, const int8_t* input, int input_zp, int size) {
+  vint32m1_t reduced = __riscv_vmv_v_x_i32m1(0, 1);
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vint8m1_t weights_i8 = __riscv_vle8_v_i8m1(weights + i, vl);
+    const vint8m1_t input_i8 = __riscv_vle8_v_i8m1(input + i, vl);
+    const vint16m2_t weights_i16 = __riscv_vsext_vf2_i16m2(weights_i8, vl);
+    const vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
+    const vint32m4_t weights_i32 = __riscv_vsext_vf2_i32m4(weights_i16, vl);
+    vint32m4_t input_i32 = __riscv_vsext_vf2_i32m4(input_i16, vl);
+    input_i32 = __riscv_vsub_vx_i32m4(input_i32, input_zp, vl);
+    const vint32m4_t product =
+        __riscv_vmul_vv_i32m4(weights_i32, input_i32, vl);
+    reduced = __riscv_vredsum_vs_i32m4_i32m1(product, reduced, vl);
+    i += vl;
+  }
+  return __riscv_vmv_x_s_i32m1_i32(reduced);
+}
+
+inline void RvvSvdfBatchVectorBatchVectorDotProductFloat(
+    const float* weights_time_data, const float* state_ptr_batch,
+    int memory_size, int num_filters, float* scratch_ptr_batch) {
+  for (int filter = 0; filter < num_filters; ++filter) {
+    scratch_ptr_batch[filter] = RvvSvdfDotProductFloat(
+        weights_time_data + filter * memory_size,
+        state_ptr_batch + filter * memory_size, memory_size);
+  }
+}
+
+inline void RvvSvdfBatchVectorBatchVectorDotProductInt16(
+    const int16_t* weights_time_data, const int16_t* state_ptr_batch,
+    int memory_size, int num_filters, int32_t* scratch_ptr_batch) {
+  for (int filter = 0; filter < num_filters; ++filter) {
+    scratch_ptr_batch[filter] = RvvSvdfDotProductInt16(
+        weights_time_data + filter * memory_size,
+        state_ptr_batch + filter * memory_size, memory_size);
+  }
+}
+
+inline void RvvSvdfCopyLatestActivationToState(const float* scratch_data,
+                                               int size, int memory_size,
+                                               float* state_data) {
+  const ptrdiff_t stride = memory_size * static_cast<ptrdiff_t>(sizeof(float));
+  float* latest_state = state_data + memory_size - 1;
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vfloat32m4_t scratch = __riscv_vle32_v_f32m4(scratch_data + i, vl);
+    __riscv_vsse32_v_f32m4(latest_state + i * memory_size, stride, scratch,
+                           vl);
+    i += vl;
+  }
+}
+#endif  // defined(USE_RVV)
+
 static inline void ApplyTimeWeightsBiasAndActivation(
     int batch_size, int memory_size, int num_filters, int num_units, int rank,
     const float* const __restrict__ weights_time_data,
@@ -44,9 +134,15 @@ static inline void ApplyTimeWeightsBiasAndActivation(
   for (int b = 0; b < batch_size; ++b) {
     float* state_ptr_batch = state_ptr + b * memory_size * num_filters;
     float* scratch_ptr_batch = scratch_ptr + b * num_filters;
+#if defined(USE_RVV)
+    RvvSvdfBatchVectorBatchVectorDotProductFloat(
+        weights_time_data, state_ptr_batch, memory_size, num_filters,
+        scratch_ptr_batch);
+#else
     tensor_utils::BatchVectorBatchVectorDotProduct(
         weights_time_data, state_ptr_batch, memory_size, num_filters,
         scratch_ptr_batch);
+#endif
   }
 
   // Reduction sum.
@@ -95,11 +191,17 @@ inline void EvalIntegerSVDF(
     for (int b = 0; b < n_batch; b++) {
       const int8_t* matrix_data = weights_feature_data;
       for (int r = 0; r < n_filter; r++) {
+#if defined(USE_RVV)
+        int32_t dot_prod = RvvSvdfDotProductInt8WithInputZeroPoint(
+            matrix_data, input_data + b * n_input, input_zp, n_input);
+        matrix_data += n_input;
+#else
         int32_t dot_prod = 0;
         const int8_t* vector_in_batch = input_data + b * n_input;
         for (int c = 0; c < n_input; c++) {
           dot_prod += *matrix_data++ * (*vector_in_batch++ - input_zp);
         }
+#endif
         dot_prod =
             MultiplyByQuantizedMultiplier(dot_prod, scale_1_a, scale_1_b);
         dot_prod = std::min(std::max(output_min, dot_prod), output_max);
@@ -120,9 +222,15 @@ inline void EvalIntegerSVDF(
     for (int b = 0; b < n_batch; ++b) {
       const int16_t* state_data_batch = state_data + b * n_memory * n_filter;
       int32_t* scratch_data_batch = scratch_data + b * n_filter;
+#if defined(USE_RVV)
+      RvvSvdfBatchVectorBatchVectorDotProductInt16(
+          weights_time_data, state_data_batch, n_memory, n_filter,
+          scratch_data_batch);
+#else
       tensor_utils::BatchVectorBatchVectorDotProduct(
           weights_time_data, state_data_batch, n_memory, n_filter,
           scratch_data_batch);
+#endif
     }
   }
 
@@ -179,9 +287,14 @@ inline void EvalFloatSVDF(
 
   // Copy the latest activation from scratch into activation_state:
   // The last, i.e. (memory_size-1)th entry for each batch, and filter.
+#if defined(USE_RVV)
+  RvvSvdfCopyLatestActivationToState(scratch_data, batch_size * num_filters,
+                                     memory_size, state_data);
+#else
   for (int i = 0; i < batch_size * num_filters; ++i) {
     state_data[i * memory_size + memory_size - 1] = scratch_data[i];
   }
+#endif
 
   ApplyTimeWeightsBiasAndActivation(
       batch_size, memory_size, num_filters, num_units, rank, weights_time_data,
@@ -231,9 +344,14 @@ inline void EvalHybridSVDF(
   }
   // Copy the latest activation from scratch into activation_state:
   // The last, i.e. (memory_size-1)th entry for each batch, and filter.
+#if defined(USE_RVV)
+  RvvSvdfCopyLatestActivationToState(scratch, batch_size * num_filters,
+                                     memory_size, state);
+#else
   for (int i = 0; i < batch_size * num_filters; ++i) {
     state[i * memory_size + memory_size - 1] = scratch[i];
   }
+#endif
 
   // TODO(b/174275776): can optimize hybrid case ~5% by unrolling loop in
   // applying time weights so that the inner loop multiplies eight elements at

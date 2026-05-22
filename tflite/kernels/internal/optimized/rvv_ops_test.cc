@@ -47,6 +47,7 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/quantize.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/reference/requantize.h"
+#include "tflite/kernels/internal/reference/svdf.h"
 #include "tflite/kernels/internal/reference/sub.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -1974,6 +1975,274 @@ TEST(RvvOpsTest,
       EXPECT_EQ(actual[0], 1.0f) << "negative zero size=" << size;
       EXPECT_EQ(actual[1], 0.0f) << "positive zero size=" << size;
     }
+  }
+}
+
+void ReferenceSvdfFloat(const TfLiteSVDFParams& params,
+                        const RuntimeShape& input_shape,
+                        const float* input_data,
+                        const RuntimeShape& weights_feature_shape,
+                        const float* weights_feature_data,
+                        const RuntimeShape& weights_time_shape,
+                        const float* weights_time_data, const float* bias_data,
+                        float* scratch_data, float* state_data,
+                        float* output_data) {
+  const int rank = params.rank;
+  const int batch_size = input_shape.Dims(0);
+  const int input_size = input_shape.Dims(1);
+  const int num_filters = weights_feature_shape.Dims(0);
+  const int num_units = num_filters / rank;
+  const int memory_size = weights_time_shape.Dims(1);
+
+  std::copy(state_data + 1, state_data + batch_size * memory_size * num_filters,
+            state_data);
+  std::fill_n(scratch_data, batch_size * num_filters, 0.0f);
+
+  for (int batch = 0; batch < batch_size; ++batch) {
+    for (int row = 0; row < num_filters; ++row) {
+      float dot_product = 0.0f;
+      for (int col = 0; col < input_size; ++col) {
+        dot_product += weights_feature_data[row * input_size + col] *
+                       input_data[batch * input_size + col];
+      }
+      scratch_data[batch * num_filters + row] += dot_product;
+    }
+  }
+
+  for (int i = 0; i < batch_size * num_filters; ++i) {
+    state_data[i * memory_size + memory_size - 1] = scratch_data[i];
+  }
+
+  for (int batch = 0; batch < batch_size; ++batch) {
+    for (int filter = 0; filter < num_filters; ++filter) {
+      float dot_product = 0.0f;
+      for (int memory = 0; memory < memory_size; ++memory) {
+        dot_product += weights_time_data[filter * memory_size + memory] *
+                       state_data[batch * memory_size * num_filters +
+                                  filter * memory_size + memory];
+      }
+      scratch_data[batch * num_filters + filter] = dot_product;
+    }
+  }
+
+  for (int batch = 0; batch < batch_size; ++batch) {
+    for (int unit = 0; unit < num_units; ++unit) {
+      float output = 0.0f;
+      for (int r = 0; r < rank; ++r) {
+        output += scratch_data[batch * num_filters + unit * rank + r];
+      }
+      if (bias_data != nullptr) {
+        output += bias_data[unit];
+      }
+      if (params.activation == kTfLiteActRelu) {
+        output = std::max(0.0f, output);
+      }
+      output_data[batch * num_units + unit] = output;
+    }
+  }
+}
+
+void ReferenceSvdfInteger(const TfLiteSVDFParams& params,
+                          const RuntimeShape& input_shape,
+                          const int8_t* input_data,
+                          const RuntimeShape& weights_feature_shape,
+                          const int8_t* weights_feature_data,
+                          const RuntimeShape& weights_time_shape,
+                          const int16_t* weights_time_data,
+                          const int32_t* bias_data, int16_t* state_data,
+                          int8_t* output_data, int32_t* scratch_data,
+                          int32_t* output_temp_data, int32_t scale_1_a,
+                          int scale_1_b, int32_t scale_2_a, int scale_2_b,
+                          int32_t input_zp, int32_t output_zp) {
+  const int rank = params.rank;
+  const int batch_size = input_shape.Dims(0);
+  const int input_size = input_shape.Dims(1);
+  const int num_filters = weights_feature_shape.Dims(0);
+  const int num_units = num_filters / rank;
+  const int memory_size = weights_time_shape.Dims(1);
+
+  std::copy(state_data + 1, state_data + batch_size * memory_size * num_filters,
+            state_data);
+
+  int16_t* result_in_batch = state_data + (memory_size - 1);
+  for (int batch = 0; batch < batch_size; ++batch) {
+    for (int row = 0; row < num_filters; ++row) {
+      int32_t dot_product = 0;
+      for (int col = 0; col < input_size; ++col) {
+        dot_product += weights_feature_data[row * input_size + col] *
+                       (input_data[batch * input_size + col] - input_zp);
+      }
+      dot_product =
+          MultiplyByQuantizedMultiplier(dot_product, scale_1_a, scale_1_b);
+      dot_product = std::min(std::max(dot_product, -32768), 32767);
+      *result_in_batch = static_cast<int16_t>(dot_product);
+      result_in_batch += memory_size;
+    }
+  }
+
+  for (int batch = 0; batch < batch_size; ++batch) {
+    for (int filter = 0; filter < num_filters; ++filter) {
+      int32_t dot_product = 0;
+      for (int memory = 0; memory < memory_size; ++memory) {
+        dot_product += weights_time_data[filter * memory_size + memory] *
+                       state_data[batch * memory_size * num_filters +
+                                  filter * memory_size + memory];
+      }
+      scratch_data[batch * num_filters + filter] = dot_product;
+    }
+  }
+
+  for (int batch = 0; batch < batch_size; ++batch) {
+    for (int unit = 0; unit < num_units; ++unit) {
+      int32_t output = 0;
+      for (int r = 0; r < rank; ++r) {
+        output += scratch_data[batch * num_filters + unit * rank + r];
+      }
+      if (bias_data != nullptr) {
+        output += bias_data[unit];
+      }
+      output =
+          MultiplyByQuantizedMultiplier(output, scale_2_a, scale_2_b);
+      output += output_zp;
+      output = std::min(std::max(output, -128), 127);
+      output_temp_data[batch * num_units + unit] = output;
+      output_data[batch * num_units + unit] = static_cast<int8_t>(output);
+    }
+  }
+}
+
+std::vector<int8_t> MakeSmallInt8Input(int size, int offset) {
+  std::vector<int8_t> values(size);
+  for (int i = 0; i < size; ++i) {
+    values[i] = static_cast<int8_t>(((i * 7 + offset) % 15) - 7);
+  }
+  return values;
+}
+
+std::vector<int16_t> MakeSmallInt16Input(int size, int offset) {
+  std::vector<int16_t> values(size);
+  for (int i = 0; i < size; ++i) {
+    values[i] = static_cast<int16_t>(((i * 17 + offset) % 129) - 64);
+  }
+  return values;
+}
+
+TEST(RvvOpsTest, SvdfFloatMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kBatch = 2;
+  constexpr int kRank = 2;
+  constexpr int kUnits = 3;
+  constexpr int kFilters = kRank * kUnits;
+
+  TfLiteSVDFParams params = {};
+  params.rank = kRank;
+  params.activation = kTfLiteActRelu;
+
+  for (int size : Float32M4VectorLengths()) {
+    if (size == 0) {
+      continue;
+    }
+    const int input_size = size;
+    const int memory_size = size;
+    const RuntimeShape input_shape({kBatch, input_size});
+    const RuntimeShape weights_feature_shape({kFilters, input_size});
+    const RuntimeShape weights_time_shape({kFilters, memory_size});
+    const RuntimeShape bias_shape({kUnits});
+    const RuntimeShape output_shape({kBatch, kUnits});
+
+    const std::vector<float> input = MakeInput(kBatch * input_size, 0.125f);
+    const std::vector<float> weights_feature =
+        MakeInput(kFilters * input_size, -0.25f);
+    const std::vector<float> weights_time =
+        MakeInput(kFilters * memory_size, 0.375f);
+    const std::vector<float> bias = MakeInput(kUnits, -0.125f);
+    std::vector<float> actual_state =
+        MakeInput(kBatch * memory_size * kFilters, 0.25f);
+    std::vector<float> expected_state = actual_state;
+    std::vector<float> actual_scratch(kBatch * kFilters);
+    std::vector<float> expected_scratch(kBatch * kFilters);
+    std::vector<float> actual_output(kBatch * kUnits);
+    std::vector<float> expected_output(kBatch * kUnits);
+
+    reference_ops::EvalFloatSVDF(
+        &params, input_shape, input.data(), weights_feature_shape,
+        weights_feature.data(), weights_time_shape, weights_time.data(),
+        bias_shape, bias.data(), actual_scratch.data(), actual_state.data(),
+        output_shape, actual_output.data());
+    ReferenceSvdfFloat(params, input_shape, input.data(), weights_feature_shape,
+                       weights_feature.data(), weights_time_shape,
+                       weights_time.data(), bias.data(), expected_scratch.data(),
+                       expected_state.data(), expected_output.data());
+
+    EXPECT_THAT(actual_state, Pointwise(FloatNear(1e-4f), expected_state))
+        << "size=" << size;
+    EXPECT_THAT(actual_output, Pointwise(FloatNear(1e-4f), expected_output))
+        << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, SvdfIntegerMatchesReferenceAcrossVectorBoundaries) {
+  constexpr int kBatch = 2;
+  constexpr int kRank = 2;
+  constexpr int kUnits = 3;
+  constexpr int kFilters = kRank * kUnits;
+  constexpr int32_t kScale1A = 1073741824;
+  constexpr int kScale1B = -3;
+  constexpr int32_t kScale2A = 1073741824;
+  constexpr int kScale2B = -5;
+  constexpr int32_t kInputZeroPoint = -2;
+  constexpr int32_t kOutputZeroPoint = 3;
+
+  TfLiteSVDFParams params = {};
+  params.rank = kRank;
+  params.activation = kTfLiteActRelu;
+
+  for (int size : Int8M1VectorLengths()) {
+    if (size == 0) {
+      continue;
+    }
+    const int input_size = size;
+    const int memory_size = size;
+    const RuntimeShape input_shape({kBatch, input_size});
+    const RuntimeShape weights_feature_shape({kFilters, input_size});
+    const RuntimeShape weights_time_shape({kFilters, memory_size});
+    const RuntimeShape bias_shape({kUnits});
+    const RuntimeShape output_shape({kBatch, kUnits});
+
+    const std::vector<int8_t> input =
+        MakeSmallInt8Input(kBatch * input_size, 3);
+    const std::vector<int8_t> weights_feature =
+        MakeSmallInt8Input(kFilters * input_size, 11);
+    const std::vector<int16_t> weights_time =
+        MakeSmallInt16Input(kFilters * memory_size, 29);
+    const std::vector<int32_t> bias = {17, -23, 31};
+    std::vector<int16_t> actual_state =
+        MakeSmallInt16Input(kBatch * memory_size * kFilters, 41);
+    std::vector<int16_t> expected_state = actual_state;
+    std::vector<int32_t> actual_scratch(kBatch * kFilters);
+    std::vector<int32_t> expected_scratch(kBatch * kFilters);
+    std::vector<int32_t> actual_output_temp(kBatch * kUnits);
+    std::vector<int32_t> expected_output_temp(kBatch * kUnits);
+    std::vector<int8_t> actual_output(kBatch * kUnits);
+    std::vector<int8_t> expected_output(kBatch * kUnits);
+
+    reference_ops::EvalIntegerSVDF(
+        &params, input_shape, input.data(), weights_feature_shape,
+        weights_feature.data(), weights_time_shape, weights_time.data(),
+        bias_shape, bias.data(), actual_state.data(), output_shape,
+        actual_output.data(), actual_scratch.data(), actual_output_temp.data(),
+        kScale1A, kScale1B, kScale2A, kScale2B, kInputZeroPoint,
+        kOutputZeroPoint);
+    ReferenceSvdfInteger(
+        params, input_shape, input.data(), weights_feature_shape,
+        weights_feature.data(), weights_time_shape, weights_time.data(),
+        bias.data(), expected_state.data(), expected_output.data(),
+        expected_scratch.data(), expected_output_temp.data(), kScale1A,
+        kScale1B, kScale2A, kScale2B, kInputZeroPoint, kOutputZeroPoint);
+
+    EXPECT_THAT(actual_state, ElementsAreArray(expected_state))
+        << "size=" << size;
+    EXPECT_THAT(actual_output, ElementsAreArray(expected_output))
+        << "size=" << size;
   }
 }
 
