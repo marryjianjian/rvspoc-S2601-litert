@@ -615,6 +615,7 @@ cc_library(
         ":common",
         ":compatibility",
         ":constants",
+        ":cpu_check",
         ":cppmath",
         ":quantization_util",
         ":reference_comparisons",
@@ -1263,6 +1264,7 @@ cc_library(
     hdrs = [
         "optimized/cpu_check.h",
         "optimized/neon_check.h",
+        "optimized/rvv_activation_utils.h",
         "optimized/rvv_check.h",
         "optimized/sse_check.h",
     ],
@@ -1355,12 +1357,16 @@ cc_test(
 cc_test(
     name = "rvv_ops_test",
     srcs = ["optimized/rvv_ops_test.cc"],
+    defines = [
+        "RVV_OPS_TEST_WITH_SINGLE_OP_MODEL",
+    ],
     deps = [
         ":common",
         ":optimized_base",
         ":portable_tensor_utils",
         ":tensor_utils_no_eigen",
         "//tflite/kernels:stablehlo_elementwise",
+        "//tflite/kernels:test_util",
         "//tflite/schema:schema_fbs",
         "@com_google_googletest//:gtest_main",
     ],

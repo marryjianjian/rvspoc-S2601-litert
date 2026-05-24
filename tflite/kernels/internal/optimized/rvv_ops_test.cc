@@ -13,14 +13,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <vector>
 
-#include <gmock/gmock.h>
-#include <gtest/gtest.h>
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/integer_ops/add.h"
 #include "tflite/kernels/internal/optimized/integer_ops/conv.h"
@@ -36,6 +37,7 @@ limitations under the License.
 #include "tflite/kernels/internal/portable_tensor_utils.h"
 #include "tflite/kernels/internal/reference/add.h"
 #include "tflite/kernels/internal/reference/div.h"
+#include "tflite/kernels/internal/reference/gelu.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
 #include "tflite/kernels/internal/reference/integer_ops/conv.h"
 #include "tflite/kernels/internal/reference/integer_ops/depthwise_conv.h"
@@ -47,10 +49,13 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/quantize.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/reference/requantize.h"
-#include "tflite/kernels/internal/reference/svdf.h"
 #include "tflite/kernels/internal/reference/sub.h"
+#include "tflite/kernels/internal/reference/svdf.h"
 #include "tflite/kernels/internal/types.h"
 #include "tflite/kernels/stablehlo_elementwise.h"
+#ifdef RVV_OPS_TEST_WITH_SINGLE_OP_MODEL
+#include "tflite/kernels/test_util.h"
+#endif
 #include "tflite/schema/schema_generated.h"
 
 namespace tflite {
@@ -131,11 +136,17 @@ void MakeStablehloSpecialFloatInputs(int size, std::vector<float>* input1,
       -std::numeric_limits<float>::denorm_min(),
   };
   const float rhs[] = {
-      -0.0f, 0.0f, 1.0f, 2.0f, -1.0f, 1.0f,
+      -0.0f,
+      0.0f,
+      1.0f,
+      2.0f,
+      -1.0f,
+      1.0f,
       std::numeric_limits<float>::denorm_min(),
       std::numeric_limits<float>::denorm_min(),
   };
-  const int count = std::min(size, static_cast<int>(sizeof(lhs) / sizeof(lhs[0])));
+  const int count =
+      std::min(size, static_cast<int>(sizeof(lhs) / sizeof(lhs[0])));
   for (int i = 0; i < count; ++i) {
     (*input1)[i] = lhs[i];
     (*input2)[i] = rhs[i];
@@ -143,7 +154,8 @@ void MakeStablehloSpecialFloatInputs(int size, std::vector<float>* input1,
 }
 
 void ExpectFloatNearOrSpecial(const std::vector<float>& actual,
-                              const std::vector<float>& expected) {
+                              const std::vector<float>& expected,
+                              float tolerance = 1e-6f) {
   ASSERT_EQ(actual.size(), expected.size());
   for (int i = 0; i < expected.size(); ++i) {
     if (std::isnan(expected[i])) {
@@ -151,9 +163,49 @@ void ExpectFloatNearOrSpecial(const std::vector<float>& actual,
     } else if (std::isinf(expected[i])) {
       EXPECT_EQ(actual[i], expected[i]) << "i=" << i;
     } else {
-      EXPECT_THAT(actual[i], FloatNear(expected[i], 1e-6f)) << "i=" << i;
+      EXPECT_THAT(actual[i], FloatNear(expected[i], tolerance)) << "i=" << i;
     }
   }
+}
+
+float ReferenceLogisticFloat(float value) {
+  constexpr float kCutoffUpper = 16.619047164916992188f;
+  constexpr float kCutoffLower = -9.0f;
+  if (value > kCutoffUpper) {
+    return 1.0f;
+  }
+  if (value < kCutoffLower) {
+    return std::exp(value);
+  }
+  return 1.0f / (1.0f + std::exp(-value));
+}
+
+std::vector<float> MakeActivationInput(int size) {
+  std::vector<float> input = MakeInput(size, -0.1875f);
+  const float special_values[] = {
+      -20.0f,
+      -16.619047164916992188f,
+      -9.0f,
+      -3.0f,
+      -1.0f,
+      -0.0f,
+      0.0f,
+      std::numeric_limits<float>::denorm_min(),
+      -std::numeric_limits<float>::denorm_min(),
+      1.0f,
+      3.0f,
+      9.0f,
+      16.619047164916992188f,
+      20.0f,
+      std::numeric_limits<float>::max(),
+      -std::numeric_limits<float>::max(),
+  };
+  const int count = std::min(size, static_cast<int>(sizeof(special_values) /
+                                                    sizeof(special_values[0])));
+  for (int i = 0; i < count; ++i) {
+    input[i] = special_values[i];
+  }
+  return input;
 }
 
 std::vector<int8_t> MakeInt8Input(int size, int offset) {
@@ -169,11 +221,18 @@ void MakeSpecialInt8Inputs(int size, std::vector<int8_t>* input1,
   *input1 = MakeInt8Input(size, 17);
   *input2 = MakeInt8Input(size, 91);
   const int8_t lhs[] = {
-      std::numeric_limits<int8_t>::min(), std::numeric_limits<int8_t>::max(),
-      -1, 0, 1, 64, -64, 127,
+      std::numeric_limits<int8_t>::min(),
+      std::numeric_limits<int8_t>::max(),
+      -1,
+      0,
+      1,
+      64,
+      -64,
+      127,
   };
   const int8_t rhs[] = {1, -1, 1, 0, 1, 1, 1, 0};
-  const int count = std::min(size, static_cast<int>(sizeof(lhs) / sizeof(lhs[0])));
+  const int count =
+      std::min(size, static_cast<int>(sizeof(lhs) / sizeof(lhs[0])));
   for (int i = 0; i < count; ++i) {
     (*input1)[i] = lhs[i];
     (*input2)[i] = rhs[i];
@@ -436,8 +495,15 @@ PoolParams MakeInt8PoolParams() {
 // coverage around its real strip-mining boundary.
 std::vector<int> VectorLengthsAroundVlmax(int vlmax) {
   std::vector<int> lengths = {
-      0, 1, 2, vlmax - 1, vlmax, vlmax + 1,
-      2 * vlmax - 1, 2 * vlmax, 2 * vlmax + 3,
+      0,
+      1,
+      2,
+      vlmax - 1,
+      vlmax,
+      vlmax + 1,
+      2 * vlmax - 1,
+      2 * vlmax,
+      2 * vlmax + 3,
   };
   lengths.erase(std::remove_if(lengths.begin(), lengths.end(),
                                [](int length) { return length < 0; }),
@@ -448,45 +514,38 @@ std::vector<int> VectorLengthsAroundVlmax(int vlmax) {
 }
 
 std::vector<int> Float32M4VectorLengths() {
-  return VectorLengthsAroundVlmax(
-      static_cast<int>(__riscv_vsetvlmax_e32m4()));
+  return VectorLengthsAroundVlmax(static_cast<int>(__riscv_vsetvlmax_e32m4()));
 }
 
 std::vector<int> Int8M1VectorLengths() {
-  return VectorLengthsAroundVlmax(
-      static_cast<int>(__riscv_vsetvlmax_e8m1()));
+  return VectorLengthsAroundVlmax(static_cast<int>(__riscv_vsetvlmax_e8m1()));
 }
 
 std::vector<int> Int8M4VectorLengths() {
-  return VectorLengthsAroundVlmax(
-      static_cast<int>(__riscv_vsetvlmax_e8m4()));
+  return VectorLengthsAroundVlmax(static_cast<int>(__riscv_vsetvlmax_e8m4()));
 }
 
 std::vector<int> Int8M8VectorLengths() {
-  return VectorLengthsAroundVlmax(
-      static_cast<int>(__riscv_vsetvlmax_e8m8()));
+  return VectorLengthsAroundVlmax(static_cast<int>(__riscv_vsetvlmax_e8m8()));
 }
 
 std::vector<int> UInt8M8VectorLengths() {
-  return VectorLengthsAroundVlmax(
-      static_cast<int>(__riscv_vsetvlmax_e8m8()));
+  return VectorLengthsAroundVlmax(static_cast<int>(__riscv_vsetvlmax_e8m8()));
 }
 
 std::vector<int> Int32M4VectorLengths() {
-  return VectorLengthsAroundVlmax(
-      static_cast<int>(__riscv_vsetvlmax_e32m4()));
+  return VectorLengthsAroundVlmax(static_cast<int>(__riscv_vsetvlmax_e32m4()));
 }
 
 std::vector<int> Int16M2VectorLengths() {
-  return VectorLengthsAroundVlmax(
-      static_cast<int>(__riscv_vsetvlmax_e16m2()));
+  return VectorLengthsAroundVlmax(static_cast<int>(__riscv_vsetvlmax_e16m2()));
 }
 
 template <typename T>
 std::vector<int> ElementLengthsAroundByteVlmax() {
   std::vector<int> lengths;
-  for (int bytes : VectorLengthsAroundVlmax(
-           static_cast<int>(__riscv_vsetvlmax_e8m8()))) {
+  for (int bytes :
+       VectorLengthsAroundVlmax(static_cast<int>(__riscv_vsetvlmax_e8m8()))) {
     if (bytes == 0) {
       lengths.push_back(0);
     } else {
@@ -592,8 +651,8 @@ TEST(RvvOpsTest, DequantizeInt8MatchesReferenceAcrossVectorBoundaries) {
     optimized_ops::Dequantize(params, shape, input.data(), shape,
                               actual.data());
     for (int i = 0; i < size; ++i) {
-      expected[i] = static_cast<float>(
-          params.scale * (input[i] - params.zero_point));
+      expected[i] =
+          static_cast<float>(params.scale * (input[i] - params.zero_point));
     }
 
     EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
@@ -615,8 +674,8 @@ TEST(RvvOpsTest, DequantizeUint8MatchesReferenceAcrossVectorBoundaries) {
     optimized_ops::Dequantize(params, shape, input.data(), shape,
                               actual.data());
     for (int i = 0; i < size; ++i) {
-      expected[i] = static_cast<float>(
-          params.scale * (input[i] - params.zero_point));
+      expected[i] =
+          static_cast<float>(params.scale * (input[i] - params.zero_point));
     }
 
     EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
@@ -638,8 +697,8 @@ TEST(RvvOpsTest, DequantizeInt16MatchesReferenceAcrossVectorBoundaries) {
     optimized_ops::Dequantize(params, shape, input.data(), shape,
                               actual.data());
     for (int i = 0; i < size; ++i) {
-      expected[i] = static_cast<float>(
-          params.scale * (input[i] - params.zero_point));
+      expected[i] =
+          static_cast<float>(params.scale * (input[i] - params.zero_point));
     }
 
     EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
@@ -659,8 +718,7 @@ TEST(RvvOpsTest, RequantizeInt8ToUint8MatchesReferenceAcrossVectorBoundaries) {
     std::vector<uint8_t> expected(size);
 
     optimized_ops::Requantize(input.data(), size, kMultiplier, kShift,
-                              kInputZeroPoint, kOutputZeroPoint,
-                              actual.data());
+                              kInputZeroPoint, kOutputZeroPoint, actual.data());
     reference_ops::Requantize(input.data(), size, kMultiplier, kShift,
                               kInputZeroPoint, kOutputZeroPoint,
                               expected.data());
@@ -681,8 +739,7 @@ TEST(RvvOpsTest, RequantizeUint8ToInt8MatchesReferenceAcrossVectorBoundaries) {
     std::vector<int8_t> expected(size);
 
     optimized_ops::Requantize(input.data(), size, kMultiplier, kShift,
-                              kInputZeroPoint, kOutputZeroPoint,
-                              actual.data());
+                              kInputZeroPoint, kOutputZeroPoint, actual.data());
     reference_ops::Requantize(input.data(), size, kMultiplier, kShift,
                               kInputZeroPoint, kOutputZeroPoint,
                               expected.data());
@@ -703,8 +760,7 @@ TEST(RvvOpsTest, RequantizeInt8ToInt8MatchesReferenceAcrossVectorBoundaries) {
     std::vector<int8_t> expected(size);
 
     optimized_ops::Requantize(input.data(), size, kMultiplier, kShift,
-                              kInputZeroPoint, kOutputZeroPoint,
-                              actual.data());
+                              kInputZeroPoint, kOutputZeroPoint, actual.data());
     reference_ops::Requantize(input.data(), size, kMultiplier, kShift,
                               kInputZeroPoint, kOutputZeroPoint,
                               expected.data());
@@ -725,8 +781,7 @@ TEST(RvvOpsTest, RequantizeInt32ToInt16MatchesReferenceAcrossVectorBoundaries) {
     std::vector<int16_t> expected(size);
 
     optimized_ops::Requantize(input.data(), size, kMultiplier, kShift,
-                              kInputZeroPoint, kOutputZeroPoint,
-                              actual.data());
+                              kInputZeroPoint, kOutputZeroPoint, actual.data());
     reference_ops::Requantize(input.data(), size, kMultiplier, kShift,
                               kInputZeroPoint, kOutputZeroPoint,
                               expected.data());
@@ -749,8 +804,7 @@ TEST(RvvOpsTest, Int8FullyConnectedMatchesReferenceAcrossVectorBoundaries) {
     const RuntimeShape input_shape({kBatches, accum_depth});
     const RuntimeShape filter_shape({kOutputDepth, accum_depth});
     const RuntimeShape output_shape({kBatches, kOutputDepth});
-    const std::vector<int8_t> input =
-        MakeInt8Input(input_shape.FlatSize(), 19);
+    const std::vector<int8_t> input = MakeInt8Input(input_shape.FlatSize(), 19);
     const std::vector<int8_t> filter =
         MakeInt8Input(filter_shape.FlatSize(), 83);
     std::vector<int8_t> actual(output_shape.FlatSize());
@@ -786,8 +840,7 @@ TEST(RvvOpsTest,
     const RuntimeShape input_shape({kBatches, accum_depth});
     const RuntimeShape filter_shape({kOutputDepth, accum_depth});
     const RuntimeShape output_shape({kBatches, kOutputDepth});
-    const std::vector<int8_t> input =
-        MakeInt8Input(input_shape.FlatSize(), 61);
+    const std::vector<int8_t> input = MakeInt8Input(input_shape.FlatSize(), 61);
     const std::vector<int8_t> filter =
         MakeInt8Input(filter_shape.FlatSize(), 131);
     std::vector<int8_t> actual(output_shape.FlatSize());
@@ -836,8 +889,7 @@ TEST(RvvOpsTest, Int8ConvPerChannelMatchesReferenceAcrossVectorBoundaries) {
     const RuntimeShape im2col_shape(
         {1, kOutputHeight, kOutputWidth,
          kFilterHeight * kFilterWidth * input_depth});
-    const std::vector<int8_t> input =
-        MakeInt8Input(input_shape.FlatSize(), 29);
+    const std::vector<int8_t> input = MakeInt8Input(input_shape.FlatSize(), 29);
     const std::vector<int8_t> filter =
         MakeInt8Input(filter_shape.FlatSize(), 179);
     std::vector<int8_t> im2col(im2col_shape.FlatSize());
@@ -883,8 +935,7 @@ TEST(RvvOpsTest,
     const RuntimeShape bias_shape({output_depth});
     const RuntimeShape output_shape(
         {kBatches, kOutputHeight, kOutputWidth, output_depth});
-    const std::vector<int8_t> input =
-        MakeInt8Input(input_shape.FlatSize(), 53);
+    const std::vector<int8_t> input = MakeInt8Input(input_shape.FlatSize(), 53);
     const std::vector<int8_t> filter =
         MakeInt8Input(filter_shape.FlatSize(), 197);
     const std::vector<int32_t> bias = MakeInt32Input(output_depth, 307);
@@ -948,8 +999,8 @@ TEST(RvvOpsTest,
     optimized_ops::AddScalarBroadcast(size, params, kBroadcastValue,
                                       input.data(), actual.data());
     for (int i = 0; i < size; ++i) {
-      expected[i] = Clamp(kBroadcastValue + input[i],
-                          params.float_activation_min,
+      expected[i] =
+          Clamp(kBroadcastValue + input[i], params.float_activation_min,
                           params.float_activation_max);
     }
 
@@ -1066,10 +1117,10 @@ TEST(RvvOpsTest, FloatAveragePoolMatchesReferenceAcrossVectorBoundaries) {
     std::vector<float> actual(output_shape.FlatSize());
     std::vector<float> expected(output_shape.FlatSize());
 
-    EXPECT_TRUE(optimized_ops::AveragePool(
-        params, input_shape, input.data(), output_shape, actual.data()));
-    EXPECT_TRUE(reference_ops::AveragePool(
-        params, input_shape, input.data(), output_shape, expected.data()));
+    EXPECT_TRUE(optimized_ops::AveragePool(params, input_shape, input.data(),
+                                           output_shape, actual.data()));
+    EXPECT_TRUE(reference_ops::AveragePool(params, input_shape, input.data(),
+                                           output_shape, expected.data()));
 
     EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
         << "depth=" << depth;
@@ -1090,10 +1141,10 @@ TEST(RvvOpsTest, Uint8AveragePoolMatchesReferenceAcrossVectorBoundaries) {
     std::vector<uint8_t> actual(output_shape.FlatSize());
     std::vector<uint8_t> expected(output_shape.FlatSize());
 
-    EXPECT_TRUE(optimized_ops::AveragePool(
-        params, input_shape, input.data(), output_shape, actual.data()));
-    EXPECT_TRUE(reference_ops::AveragePool(
-        params, input_shape, input.data(), output_shape, expected.data()));
+    EXPECT_TRUE(optimized_ops::AveragePool(params, input_shape, input.data(),
+                                           output_shape, actual.data()));
+    EXPECT_TRUE(reference_ops::AveragePool(params, input_shape, input.data(),
+                                           output_shape, expected.data()));
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
   }
@@ -1108,7 +1159,8 @@ TEST(RvvOpsTest, Int8AveragePoolMatchesReferenceAcrossVectorBoundaries) {
     }
     const RuntimeShape input_shape({1, 4, 5, depth});
     const RuntimeShape output_shape({1, 4, 3, depth});
-    const std::vector<int8_t> input = MakeInt8Input(input_shape.FlatSize(), 181);
+    const std::vector<int8_t> input =
+        MakeInt8Input(input_shape.FlatSize(), 181);
     std::vector<int8_t> actual(output_shape.FlatSize());
     std::vector<int8_t> expected(output_shape.FlatSize());
 
@@ -1158,8 +1210,7 @@ TEST(RvvOpsTest, FloatReduceMaxLastAxisMatchesReferenceAcrossVectorBoundaries) {
     const int output_dims[] = {kOuterSize};
     int resolved_axis[2];
     int normalized_dims[2];
-    const std::vector<float> input =
-        MakeInput(kOuterSize * axis_size, -0.125f);
+    const std::vector<float> input = MakeInput(kOuterSize * axis_size, -0.125f);
     std::vector<float> actual(kOuterSize);
     std::vector<float> expected(kOuterSize,
                                 std::numeric_limits<float>::lowest());
@@ -1191,8 +1242,7 @@ TEST(RvvOpsTest, FloatReduceMinLastAxisMatchesReferenceAcrossVectorBoundaries) {
     const int output_dims[] = {kOuterSize};
     int resolved_axis[2];
     int normalized_dims[2];
-    const std::vector<float> input =
-        MakeInput(kOuterSize * axis_size, 0.375f);
+    const std::vector<float> input = MakeInput(kOuterSize * axis_size, 0.375f);
     std::vector<float> actual(kOuterSize);
     std::vector<float> expected(kOuterSize, std::numeric_limits<float>::max());
 
@@ -1223,8 +1273,7 @@ TEST(RvvOpsTest, FloatReduceSumLastAxisMatchesReferenceAcrossVectorBoundaries) {
     const int output_dims[] = {kOuterSize};
     int resolved_axis[2];
     int normalized_dims[2];
-    const std::vector<float> input =
-        MakeInput(kOuterSize * axis_size, -0.5f);
+    const std::vector<float> input = MakeInput(kOuterSize * axis_size, -0.5f);
     std::vector<float> actual(kOuterSize);
     std::vector<float> expected(kOuterSize, 0.0f);
 
@@ -1255,8 +1304,7 @@ TEST(RvvOpsTest, FloatMeanLastAxisMatchesReferenceAcrossVectorBoundaries) {
     int resolved_axis[2];
     int normalized_dims[2];
     std::vector<float> temp_sum(kOuterSize);
-    const std::vector<float> input =
-        MakeInput(kOuterSize * axis_size, 0.25f);
+    const std::vector<float> input = MakeInput(kOuterSize * axis_size, 0.25f);
     std::vector<float> actual(kOuterSize);
     std::vector<float> expected(kOuterSize, 0.0f);
 
@@ -1285,8 +1333,7 @@ TEST(RvvOpsTest, FloatArgMaxLastAxisMatchesReferenceAcrossVectorBoundaries) {
     }
     const RuntimeShape input_shape({kOuterSize, axis_size});
     const RuntimeShape output_shape({kOuterSize});
-    const std::vector<float> input =
-        MakeInput(kOuterSize * axis_size, -0.75f);
+    const std::vector<float> input = MakeInput(kOuterSize * axis_size, -0.75f);
     std::vector<int32_t> actual(kOuterSize);
     std::vector<int32_t> expected(kOuterSize);
 
@@ -1310,8 +1357,7 @@ TEST(RvvOpsTest, FloatArgMinLastAxisMatchesReferenceAcrossVectorBoundaries) {
     }
     const RuntimeShape input_shape({kOuterSize, axis_size});
     const RuntimeShape output_shape({kOuterSize});
-    const std::vector<float> input =
-        MakeInput(kOuterSize * axis_size, 0.75f);
+    const std::vector<float> input = MakeInput(kOuterSize * axis_size, 0.75f);
     std::vector<int32_t> actual(kOuterSize);
     std::vector<int32_t> expected(kOuterSize);
 
@@ -1337,8 +1383,8 @@ TEST(RvvOpsTest, FloatSubMatchesReferenceAcrossVectorBoundaries) {
     std::vector<float> actual(size);
     std::vector<float> expected(size);
 
-    optimized_ops::SubWithActivation<float>(
-        params, shape, input1.data(), shape, input2.data(), shape,
+    optimized_ops::SubWithActivation<float>(params, shape, input1.data(), shape,
+                                            input2.data(), shape,
         actual.data());
     reference_ops::SubWithActivation(params, shape, input1.data(), shape,
                                      input2.data(), shape, expected.data());
@@ -1370,8 +1416,7 @@ TEST(RvvOpsTest, FloatLeakyReluMatchesReferenceAcrossVectorBoundaries) {
     std::vector<float> actual(size);
     std::vector<float> expected(size);
 
-    optimized_ops::LeakyRelu(params, shape, input.data(), shape,
-                             actual.data());
+    optimized_ops::LeakyRelu(params, shape, input.data(), shape, actual.data());
     reference_ops::LeakyRelu(params, shape, input.data(), shape,
                              expected.data());
 
@@ -1399,8 +1444,7 @@ TEST(RvvOpsTest,
   }
 }
 
-TEST(RvvOpsTest,
-     FloatPReluElementWiseMatchesReferenceAcrossVectorBoundaries) {
+TEST(RvvOpsTest, FloatPReluElementWiseMatchesReferenceAcrossVectorBoundaries) {
   ArithmeticParams params;
 
   for (int size : Float32M4VectorLengths()) {
@@ -1437,6 +1481,114 @@ TEST(RvvOpsTest, FloatHardSwishMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, FloatLogisticMatchesScalarAcrossVectorBoundaries) {
+  LogisticParams params;
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input = MakeActivationInput(size);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::Logistic(params, shape, input.data(), shape, actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = ReferenceLogisticFloat(input[i]);
+    }
+
+    SCOPED_TRACE(size);
+    ExpectFloatNearOrSpecial(actual, expected);
+  }
+}
+
+TEST(RvvOpsTest, FloatTanhMatchesScalarAcrossVectorBoundaries) {
+  TanhParams params;
+
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input = MakeActivationInput(size);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::Tanh(params, shape, input.data(), shape, actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::tanh(input[i]);
+    }
+
+    SCOPED_TRACE(size);
+    ExpectFloatNearOrSpecial(actual, expected);
+  }
+}
+
+TEST(RvvOpsTest, FloatEluMatchesScalarAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input = MakeActivationInput(size);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::Elu(shape, input.data(), shape, actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = input[i] < 0.0f ? std::expm1(input[i]) : input[i];
+    }
+
+    SCOPED_TRACE(size);
+    ExpectFloatNearOrSpecial(actual, expected);
+  }
+}
+
+TEST(RvvOpsTest, FloatGeluMatchesScalarAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input = MakeActivationInput(size);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    reference_ops::Gelu(shape, input.data(), /*approximate=*/false, shape,
+                        actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = reference_ops::GeluTransform(input[i]);
+    }
+
+    SCOPED_TRACE(size);
+    ExpectFloatNearOrSpecial(actual, expected, 1e-5f);
+  }
+}
+
+TEST(RvvOpsTest, FloatGeluApproximateMatchesScalarAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input = MakeActivationInput(size);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    reference_ops::Gelu(shape, input.data(), /*approximate=*/true, shape,
+                        actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = reference_ops::GeluTransformApproximate(input[i]);
+    }
+
+    SCOPED_TRACE(size);
+    ExpectFloatNearOrSpecial(actual, expected, 1e-5f);
+  }
+}
+
+TEST(RvvOpsTest, FloatSwishMatchesScalarAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    const RuntimeShape shape({size});
+    const std::vector<float> input = MakeActivationInput(size);
+    std::vector<float> actual(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::Swish(shape, input.data(), shape, actual.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = input[i] * ReferenceLogisticFloat(input[i]);
+    }
+
+    SCOPED_TRACE(size);
+    ExpectFloatNearOrSpecial(actual, expected);
+  }
+}
+
 TEST(RvvOpsTest, FloatSoftmaxMatchesReferenceAcrossVectorBoundaries) {
   SoftmaxParams params;
   params.beta = 0.75f;
@@ -1452,8 +1604,7 @@ TEST(RvvOpsTest, FloatSoftmaxMatchesReferenceAcrossVectorBoundaries) {
     std::vector<float> expected(kBatchSize * depth);
 
     optimized_ops::Softmax(params, shape, input.data(), shape, actual.data());
-    reference_ops::Softmax(params, shape, input.data(), shape,
-                           expected.data());
+    reference_ops::Softmax(params, shape, input.data(), shape, expected.data());
 
     EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
         << "depth=" << depth;
@@ -1507,7 +1658,8 @@ TEST(RvvOpsTest, FloatMulElementwiseMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
-TEST(RvvOpsTest, FloatMulSimpleBroadcastMatchesReferenceAcrossVectorBoundaries) {
+TEST(RvvOpsTest,
+     FloatMulSimpleBroadcastMatchesReferenceAcrossVectorBoundaries) {
   ArithmeticParams params;
   params.float_activation_min = -2.75f;
   params.float_activation_max = 3.25f;
@@ -1521,8 +1673,8 @@ TEST(RvvOpsTest, FloatMulSimpleBroadcastMatchesReferenceAcrossVectorBoundaries) 
     optimized_ops::MulSimpleBroadcast(size, params, kBroadcastValue,
                                       input.data(), actual.data());
     for (int i = 0; i < size; ++i) {
-      expected[i] = Clamp(kBroadcastValue * input[i],
-                          params.float_activation_min,
+      expected[i] =
+          Clamp(kBroadcastValue * input[i], params.float_activation_min,
                           params.float_activation_max);
     }
 
@@ -1581,8 +1733,8 @@ TEST(RvvOpsTest, Int8AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
     std::vector<int8_t> actual(size);
     std::vector<int8_t> expected(size);
 
-    optimized_integer_ops::AddElementwiseInt8(
-        size, params, input1.data(), input2.data(), actual.data());
+    optimized_integer_ops::AddElementwiseInt8(size, params, input1.data(),
+                                              input2.data(), actual.data());
     reference_integer_ops::AddElementwise(size, params, input1.data(),
                                           input2.data(), expected.data());
 
@@ -1599,8 +1751,8 @@ TEST(RvvOpsTest, Int8AddScalarBroadcastMatchesReferenceAcrossVectorBoundaries) {
     std::vector<int8_t> actual(size);
     std::vector<int8_t> expected(size);
 
-    optimized_integer_ops::AddScalarBroadcast(
-        size, params, kBroadcastValue, input.data(), actual.data());
+    optimized_integer_ops::AddScalarBroadcast(size, params, kBroadcastValue,
+                                              input.data(), actual.data());
     for (int i = 0; i < size; ++i) {
       expected[i] =
           reference_integer_ops::AddFunc(kBroadcastValue, input[i], params);
@@ -1619,8 +1771,8 @@ TEST(RvvOpsTest, Int8SubElementwiseMatchesReferenceAcrossVectorBoundaries) {
     std::vector<int8_t> actual(size);
     std::vector<int8_t> expected(size);
 
-    optimized_integer_ops::SubElementwiseInt8(
-        size, params, input1.data(), input2.data(), actual.data());
+    optimized_integer_ops::SubElementwiseInt8(size, params, input1.data(),
+                                              input2.data(), actual.data());
     reference_ops::SubElementwise(size, params, input1.data(), input2.data(),
                                   expected.data());
 
@@ -1637,10 +1789,10 @@ TEST(RvvOpsTest, Int8MulElementwiseMatchesReferenceAcrossVectorBoundaries) {
       std::vector<int8_t> actual(size);
       std::vector<int8_t> expected(size);
 
-      optimized_integer_ops::MulElementwise(
-          size, params, input1.data(), input2.data(), actual.data());
-      reference_integer_ops::MulElementwise(
-          size, params, input1.data(), input2.data(), expected.data());
+      optimized_integer_ops::MulElementwise(size, params, input1.data(),
+                                            input2.data(), actual.data());
+      reference_integer_ops::MulElementwise(size, params, input1.data(),
+                                            input2.data(), expected.data());
 
       EXPECT_THAT(actual, ElementsAreArray(expected))
           << "size=" << size << " output_shift=" << params.output_shift;
@@ -1659,11 +1811,10 @@ TEST(RvvOpsTest, Int8MulSimpleBroadcastMatchesReferenceAcrossVectorBoundaries) {
       std::vector<int8_t> actual(size);
       std::vector<int8_t> expected(size);
 
-      optimized_integer_ops::MulSimpleBroadcast(
-          size, params, kBroadcastValue, input.data(), actual.data());
+      optimized_integer_ops::MulSimpleBroadcast(size, params, kBroadcastValue,
+                                                input.data(), actual.data());
       reference_integer_ops::MulElementwise(
-          size, params, broadcast_values.data(), input.data(),
-          expected.data());
+          size, params, broadcast_values.data(), input.data(), expected.data());
 
       EXPECT_THAT(actual, ElementsAreArray(expected))
           << "size=" << size << " output_shift=" << params.output_shift;
@@ -1732,10 +1883,10 @@ TEST(RvvOpsTest, Uint8MulElementwiseMatchesReferenceAcrossVectorBoundaries) {
       std::vector<uint8_t> actual(size);
       std::vector<uint8_t> expected(size);
 
-      optimized_ops::MulElementwise(size, params, input1.data(),
-                                    input2.data(), actual.data());
-      reference_ops::MulElementwise(size, params, input1.data(),
-                                    input2.data(), expected.data());
+      optimized_ops::MulElementwise(size, params, input1.data(), input2.data(),
+                                    actual.data());
+      reference_ops::MulElementwise(size, params, input1.data(), input2.data(),
+                                    expected.data());
 
       EXPECT_THAT(actual, ElementsAreArray(expected))
           << "size=" << size << " output_shift=" << params.output_shift;
@@ -1743,7 +1894,8 @@ TEST(RvvOpsTest, Uint8MulElementwiseMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
-TEST(RvvOpsTest, Uint8AddScalarBroadcastMatchesReferenceAcrossVectorBoundaries) {
+TEST(RvvOpsTest,
+     Uint8AddScalarBroadcastMatchesReferenceAcrossVectorBoundaries) {
   const ArithmeticParams params = MakeUint8Params();
   constexpr uint8_t kBroadcastValue = 173;
 
@@ -1809,8 +1961,8 @@ TEST(RvvOpsTest, Int16AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
     std::vector<int16_t> actual(size);
     std::vector<int16_t> expected(size);
 
-    optimized_integer_ops::AddElementwiseInt16(
-        size, params, input1.data(), input2.data(), actual.data());
+    optimized_integer_ops::AddElementwiseInt16(size, params, input1.data(),
+                                               input2.data(), actual.data());
     reference_ops::AddElementwise(size, params, input1.data(), input2.data(),
                                   expected.data());
 
@@ -1827,8 +1979,8 @@ TEST(RvvOpsTest, Int16LeakyReluMatchesReferenceAcrossVectorBoundaries) {
     std::vector<int16_t> actual(size);
     std::vector<int16_t> expected(size);
 
-    optimized_integer_ops::QuantizeLeakyRelu(
-        params, shape, input.data(), shape, actual.data());
+    optimized_integer_ops::QuantizeLeakyRelu(params, shape, input.data(), shape,
+                                             actual.data());
     reference_ops::QuantizeLeakyRelu(params, shape, input.data(), shape,
                                      expected.data());
 
@@ -1861,8 +2013,8 @@ TEST(RvvOpsTest, Int16SubElementwiseMatchesReferenceAcrossVectorBoundaries) {
     std::vector<int16_t> actual(size);
     std::vector<int16_t> expected(size);
 
-    optimized_integer_ops::SubElementwiseInt16(
-        size, params, input1.data(), input2.data(), actual.data());
+    optimized_integer_ops::SubElementwiseInt16(size, params, input1.data(),
+                                               input2.data(), actual.data());
     reference_ops::SubElementwise(size, params, input1.data(), input2.data(),
                                   expected.data());
 
@@ -1876,8 +2028,7 @@ void ReferenceLstmCwiseMulInt16(const int16_t* input1, const int16_t* input2,
   for (int batch = 0; batch < n_batch; ++batch) {
     for (int i = 0; i < n_input; ++i) {
       const int index = batch * n_input + i;
-      const int32_t value =
-          static_cast<int32_t>(input1[index]) * input2[index];
+      const int32_t value = static_cast<int32_t>(input1[index]) * input2[index];
       output[index] =
           static_cast<int16_t>(gemmlowp::RoundingDivideByPOT(value, shift));
     }
@@ -1885,10 +2036,10 @@ void ReferenceLstmCwiseMulInt16(const int16_t* input1, const int16_t* input2,
 }
 
 void ReferenceLstmCwiseMulInt16ToInt8(const int16_t* input1,
-                                      const int16_t* input2,
-                                      int32_t multiplier, int32_t shift,
-                                      int32_t n_batch, int32_t n_input,
-                                      int32_t output_zp, int8_t* output) {
+                                      const int16_t* input2, int32_t multiplier,
+                                      int32_t shift, int32_t n_batch,
+                                      int32_t n_input, int32_t output_zp,
+                                      int8_t* output) {
   for (int batch = 0; batch < n_batch; ++batch) {
     for (int i = 0; i < n_input; ++i) {
       const int index = batch * n_input + i;
@@ -1915,8 +2066,8 @@ void ReferenceLstmCwiseAddInt16(const int16_t* input1, const int16_t* input2,
 }
 
 void ReferenceLstmVectorBatchVectorCwiseProductAccumulate(
-    const int16_t* vector, int v_size, const int16_t* batch_vector,
-    int n_batch, int32_t multiplier, int shift, int16_t* result) {
+    const int16_t* vector, int v_size, const int16_t* batch_vector, int n_batch,
+    int32_t multiplier, int shift, int16_t* result) {
   for (int batch = 0; batch < n_batch; ++batch) {
     for (int i = 0; i < v_size; ++i) {
       const int index = batch * v_size + i;
@@ -1938,8 +2089,8 @@ void ReferenceRnnMatrixBatchVectorMultiplyAccumulateFloat(
     for (int row = 0; row < m_rows; ++row) {
       float dot_product = 0.0f;
       for (int col = 0; col < m_cols; ++col) {
-        dot_product += matrix[row * m_cols + col] *
-                       vector[batch * m_cols + col];
+        dot_product +=
+            matrix[row * m_cols + col] * vector[batch * m_cols + col];
       }
       *result_in_batch += dot_product;
       ++result_in_batch;
@@ -1955,8 +2106,8 @@ void ReferenceRnnMatrixBatchVectorMultiplyAccumulateInt8(
     for (int row = 0; row < m_rows; ++row) {
       int32_t dot_product = 0;
       for (int col = 0; col < m_cols; ++col) {
-        dot_product += matrix[row * m_cols + col] *
-                       vectors[batch * m_cols + col];
+        dot_product +=
+            matrix[row * m_cols + col] * vectors[batch * m_cols + col];
       }
       float scale = scaling_factors[batch];
       if (per_channel_scale != nullptr) {
@@ -1984,7 +2135,8 @@ std::vector<int32_t> ReferenceRnnRowSums(const int8_t* matrix, int m_rows,
   return row_sums;
 }
 
-TEST(RvvOpsTest,
+TEST(
+    RvvOpsTest,
      RnnFloatMatrixBatchVectorMultiplyAccumulateMatchesReferenceAcrossVectorBoundaries) {
   constexpr int kRows = 7;
   constexpr int kBatch = 3;
@@ -2005,7 +2157,8 @@ TEST(RvvOpsTest,
   }
 }
 
-TEST(RvvOpsTest,
+TEST(
+    RvvOpsTest,
      RnnHybridInt8MatrixBatchVectorMultiplyAccumulateMatchesReferenceAcrossVectorBoundaries) {
   constexpr int kRows = 6;
   constexpr int kBatch = 3;
@@ -2030,13 +2183,13 @@ TEST(RvvOpsTest,
   }
 }
 
-TEST(RvvOpsTest,
+TEST(
+    RvvOpsTest,
      RnnHybridInt8MatrixBatchVectorMultiplyAccumulateWithOffsetsMatchesReferenceAcrossVectorBoundaries) {
   constexpr int kRows = 5;
   constexpr int kBatch = 3;
   const std::vector<float> scaling_factors = {0.03125f, 0.046875f, 0.0625f};
-  const std::vector<float> per_channel_scale = {0.5f, 0.75f, 1.0f, 1.25f,
-                                                1.5f};
+  const std::vector<float> per_channel_scale = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f};
   const std::vector<int32_t> input_offsets = {-3, 5, -7};
 
   for (int cols : Int8M1VectorLengths()) {
@@ -2068,8 +2221,7 @@ TEST(RvvOpsTest,
   }
 }
 
-TEST(RvvOpsTest,
-     RnnFloatActivationsMatchReferenceAcrossVectorBoundaries) {
+TEST(RvvOpsTest, RnnFloatActivationsMatchReferenceAcrossVectorBoundaries) {
   for (int size : Float32M4VectorLengths()) {
     const std::vector<float> input = MakeInput(size, -0.25f);
     std::vector<float> actual(size);
@@ -2114,15 +2266,12 @@ TEST(RvvOpsTest,
   }
 }
 
-void ReferenceSvdfFloat(const TfLiteSVDFParams& params,
-                        const RuntimeShape& input_shape,
-                        const float* input_data,
-                        const RuntimeShape& weights_feature_shape,
-                        const float* weights_feature_data,
-                        const RuntimeShape& weights_time_shape,
-                        const float* weights_time_data, const float* bias_data,
-                        float* scratch_data, float* state_data,
-                        float* output_data) {
+void ReferenceSvdfFloat(
+    const TfLiteSVDFParams& params, const RuntimeShape& input_shape,
+    const float* input_data, const RuntimeShape& weights_feature_shape,
+    const float* weights_feature_data, const RuntimeShape& weights_time_shape,
+    const float* weights_time_data, const float* bias_data, float* scratch_data,
+    float* state_data, float* output_data) {
   const int rank = params.rank;
   const int batch_size = input_shape.Dims(0);
   const int input_size = input_shape.Dims(1);
@@ -2178,18 +2327,14 @@ void ReferenceSvdfFloat(const TfLiteSVDFParams& params,
   }
 }
 
-void ReferenceSvdfInteger(const TfLiteSVDFParams& params,
-                          const RuntimeShape& input_shape,
-                          const int8_t* input_data,
-                          const RuntimeShape& weights_feature_shape,
-                          const int8_t* weights_feature_data,
-                          const RuntimeShape& weights_time_shape,
-                          const int16_t* weights_time_data,
-                          const int32_t* bias_data, int16_t* state_data,
-                          int8_t* output_data, int32_t* scratch_data,
-                          int32_t* output_temp_data, int32_t scale_1_a,
-                          int scale_1_b, int32_t scale_2_a, int scale_2_b,
-                          int32_t input_zp, int32_t output_zp) {
+void ReferenceSvdfInteger(
+    const TfLiteSVDFParams& params, const RuntimeShape& input_shape,
+    const int8_t* input_data, const RuntimeShape& weights_feature_shape,
+    const int8_t* weights_feature_data, const RuntimeShape& weights_time_shape,
+    const int16_t* weights_time_data, const int32_t* bias_data,
+    int16_t* state_data, int8_t* output_data, int32_t* scratch_data,
+    int32_t* output_temp_data, int32_t scale_1_a, int scale_1_b,
+    int32_t scale_2_a, int scale_2_b, int32_t input_zp, int32_t output_zp) {
   const int rank = params.rank;
   const int batch_size = input_shape.Dims(0);
   const int input_size = input_shape.Dims(1);
@@ -2237,8 +2382,7 @@ void ReferenceSvdfInteger(const TfLiteSVDFParams& params,
       if (bias_data != nullptr) {
         output += bias_data[unit];
       }
-      output =
-          MultiplyByQuantizedMultiplier(output, scale_2_a, scale_2_b);
+      output = MultiplyByQuantizedMultiplier(output, scale_2_a, scale_2_b);
       output += output_zp;
       output = std::min(std::max(output, -128), 127);
       output_temp_data[batch * num_units + unit] = output;
@@ -2306,8 +2450,9 @@ TEST(RvvOpsTest, SvdfFloatMatchesReferenceAcrossVectorBoundaries) {
         output_shape, actual_output.data());
     ReferenceSvdfFloat(params, input_shape, input.data(), weights_feature_shape,
                        weights_feature.data(), weights_time_shape,
-                       weights_time.data(), bias.data(), expected_scratch.data(),
-                       expected_state.data(), expected_output.data());
+                       weights_time.data(), bias.data(),
+                       expected_scratch.data(), expected_state.data(),
+                       expected_output.data());
 
     EXPECT_THAT(actual_state, Pointwise(FloatNear(1e-4f), expected_state))
         << "size=" << size;
@@ -2483,7 +2628,8 @@ TEST(RvvOpsTest, LstmSub1VectorMatchesPortableAcrossVectorBoundaries) {
   }
 }
 
-TEST(RvvOpsTest, ResizeNearestNeighborUint8MatchesScalarAcrossVectorBoundaries) {
+TEST(RvvOpsTest,
+     ResizeNearestNeighborUint8MatchesScalarAcrossVectorBoundaries) {
   ResizeNearestNeighborParams params = {};
   params.align_corners = false;
   params.half_pixel_centers = false;
@@ -2497,8 +2643,7 @@ TEST(RvvOpsTest, ResizeNearestNeighborUint8MatchesScalarAcrossVectorBoundaries) 
     constexpr int kInputWidth = 4;
     constexpr int kOutputHeight = 5;
     constexpr int kOutputWidth = 7;
-    const RuntimeShape input_shape(
-        {kBatch, kInputHeight, kInputWidth, depth});
+    const RuntimeShape input_shape({kBatch, kInputHeight, kInputWidth, depth});
     const RuntimeShape output_size_shape({2});
     const int32_t output_size_data[2] = {kOutputHeight, kOutputWidth};
     const RuntimeShape output_shape(
@@ -2508,23 +2653,23 @@ TEST(RvvOpsTest, ResizeNearestNeighborUint8MatchesScalarAcrossVectorBoundaries) 
     std::vector<uint8_t> actual(output_shape.FlatSize());
     std::vector<uint8_t> expected(output_shape.FlatSize());
 
-    optimized_ops::ResizeNearestNeighbor(
-        params, input_shape, input.data(), output_size_shape, output_size_data,
+    optimized_ops::ResizeNearestNeighbor(params, input_shape, input.data(),
+                                         output_size_shape, output_size_data,
         output_shape, actual.data());
     int out = 0;
     for (int b = 0; b < kBatch; ++b) {
       for (int y = 0; y < kOutputHeight; ++y) {
         const int in_y = std::min(
-            static_cast<int>(std::floor(y * (static_cast<float>(kInputHeight) /
-                                             kOutputHeight))),
+            static_cast<int>(std::floor(
+                y * (static_cast<float>(kInputHeight) / kOutputHeight))),
             kInputHeight - 1);
         for (int x = 0; x < kOutputWidth; ++x) {
           const int in_x = std::min(
               static_cast<int>(std::floor(
                   x * (static_cast<float>(kInputWidth) / kOutputWidth))),
               kInputWidth - 1);
-          const int in = ((b * kInputHeight + in_y) * kInputWidth + in_x) *
-                         depth;
+          const int in =
+              ((b * kInputHeight + in_y) * kInputWidth + in_x) * depth;
           for (int c = 0; c < depth; ++c) {
             expected[out++] = input[in + c];
           }
@@ -2557,8 +2702,8 @@ TEST(RvvOpsTest, ConcatenationFloatMatchesScalarAcrossVectorBoundaries) {
     std::vector<float> actual(output_shape.FlatSize());
     std::vector<float> expected(output_shape.FlatSize());
 
-    reference_ops::Concatenation(params, input_shapes, input_data,
-                                 output_shape, actual.data());
+    reference_ops::Concatenation(params, input_shapes, input_data, output_shape,
+                                 actual.data());
     int out = 0;
     for (int outer = 0; outer < kOuter; ++outer) {
       const int input0_base = outer * 2 * inner_size;
@@ -2591,8 +2736,7 @@ TEST(RvvOpsTest, PadInt8MatchesScalarAcrossVectorBoundaries) {
     const RuntimeShape output_shape(
         {3, 3, 6, 7, input_depth + left_padding[4] + right_padding[4]});
     const int8_t pad_value = -9;
-    const std::vector<int8_t> input =
-        MakeInt8Input(input_shape.FlatSize(), 31);
+    const std::vector<int8_t> input = MakeInt8Input(input_shape.FlatSize(), 31);
     std::vector<int8_t> actual(output_shape.FlatSize());
     std::vector<int8_t> expected(output_shape.FlatSize(), pad_value);
 
@@ -2631,17 +2775,17 @@ TEST(RvvOpsTest, GatherFloatMatchesScalarAcrossVectorBoundaries) {
     constexpr int kAxis = 5;
     const RuntimeShape input_shape({kOuter, kAxis, inner_size});
     const RuntimeShape coords_shape({6});
-    const RuntimeShape output_shape({kOuter, coords_shape.FlatSize(),
-                                     inner_size});
+    const RuntimeShape output_shape(
+        {kOuter, coords_shape.FlatSize(), inner_size});
     const std::vector<float> input =
         MakeSpecialFloatInput(input_shape.FlatSize(), 0.75f);
     const std::vector<int32_t> coords = {4, 0, 3, 1, 1, 2};
     std::vector<float> actual(output_shape.FlatSize());
     std::vector<float> expected(output_shape.FlatSize());
 
-    ASSERT_EQ(reference_ops::Gather(params, input_shape, input.data(),
-                                    coords_shape, coords.data(), output_shape,
-                                    actual.data()),
+    ASSERT_EQ(
+        reference_ops::Gather(params, input_shape, input.data(), coords_shape,
+                              coords.data(), output_shape, actual.data()),
               kTfLiteOk);
     int out = 0;
     for (int outer = 0; outer < kOuter; ++outer) {
@@ -2657,6 +2801,7 @@ TEST(RvvOpsTest, GatherFloatMatchesScalarAcrossVectorBoundaries) {
   }
 }
 
+#ifdef RVV_OPS_TEST_WITH_SINGLE_OP_MODEL
 class StablehloElementwiseOpModel : public SingleOpModel {
  public:
   StablehloElementwiseOpModel(BuiltinOperator op, TensorType type,
@@ -2682,6 +2827,7 @@ class StablehloElementwiseOpModel : public SingleOpModel {
   int input2_;
   int output_;
 };
+#endif
 
 TEST(RvvOpsTest, StablehloFloatElementwiseMatchesScalarAcrossVectorBoundaries) {
   for (int size : Float32M4VectorLengths()) {
@@ -2717,6 +2863,7 @@ TEST(RvvOpsTest, StablehloFloatElementwiseMatchesScalarAcrossVectorBoundaries) {
   }
 }
 
+#ifdef RVV_OPS_TEST_WITH_SINGLE_OP_MODEL
 TEST(RvvOpsTest, StablehloFloatKernelEntryMatchesScalarAcrossVectorBoundaries) {
   for (int size : Float32M4VectorLengths()) {
     if (size == 0) {
@@ -2768,6 +2915,7 @@ TEST(RvvOpsTest, StablehloFloatKernelEntryMatchesScalarAcrossVectorBoundaries) {
     }
   }
 }
+#endif
 
 TEST(RvvOpsTest, StablehloInt8ElementwiseMatchesScalarAcrossVectorBoundaries) {
   for (int size : Int8M4VectorLengths()) {
@@ -2801,6 +2949,7 @@ TEST(RvvOpsTest, StablehloInt8ElementwiseMatchesScalarAcrossVectorBoundaries) {
   }
 }
 
+#ifdef RVV_OPS_TEST_WITH_SINGLE_OP_MODEL
 TEST(RvvOpsTest, StablehloInt8KernelEntryMatchesScalarAcrossVectorBoundaries) {
   for (int size : Int8M4VectorLengths()) {
     if (size == 0) {
@@ -2845,6 +2994,7 @@ TEST(RvvOpsTest, StablehloInt8KernelEntryMatchesScalarAcrossVectorBoundaries) {
     }
   }
 }
+#endif
 
 TEST(RvvOpsTest, StablehloInt32MinMaxMatchesScalarAcrossVectorBoundaries) {
   for (int size : Int32M4VectorLengths()) {
@@ -2887,17 +3037,17 @@ TEST(RvvOpsTest, LstmCwiseMulInt16ToInt8MatchesPortableAcrossVectorBoundaries) {
     std::vector<int8_t> actual(kBatch * n_input);
     std::vector<int8_t> expected(kBatch * n_input);
 
-    tensor_utils::CwiseMul(input1.data(), input2.data(), 1073741824, -7,
-                           kBatch, n_input, -5, actual.data());
+    tensor_utils::CwiseMul(input1.data(), input2.data(), 1073741824, -7, kBatch,
+                           n_input, -5, actual.data());
     ReferenceLstmCwiseMulInt16ToInt8(input1.data(), input2.data(), 1073741824,
-                                     -7, kBatch, n_input, -5,
-                                     expected.data());
+                                     -7, kBatch, n_input, -5, expected.data());
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
   }
 }
 
-TEST(RvvOpsTest,
+TEST(
+    RvvOpsTest,
      LstmVectorBatchVectorCwiseProductAccumulateMatchesPortableAcrossVectorBoundaries) {
   for (int size : Int16M2VectorLengths()) {
     constexpr int kBatch = 3;

@@ -16,6 +16,7 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_ELU_H_
 
 #include "tflite/kernels/internal/cppmath.h"
+#include "tflite/kernels/internal/optimized/rvv_activation_utils.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {
@@ -25,6 +26,12 @@ namespace reference_ops {
 inline void Elu(const RuntimeShape& input_shape, const float* input_data,
                 const RuntimeShape& output_shape, float* output_data) {
   const int flat_size = MatchingFlatSize(input_shape, output_shape);
+#ifdef USE_RVV
+  rvv_ops::UnaryFloatTransform(
+      flat_size, input_data, output_data,
+      [](float val) { return val < 0.0f ? TfLiteExpm1(val) : val; });
+  return;
+#endif
   for (int i = 0; i < flat_size; ++i) {
     const float val = input_data[i];
     output_data[i] = val < 0.0f ? TfLiteExpm1(val) : val;

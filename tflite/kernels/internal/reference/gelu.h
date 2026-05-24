@@ -18,12 +18,14 @@ limitations under the License.
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <type_traits>
 
 #include "Eigen/Core"  // from @eigen_archive
-#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/constants.h"
+#include "tflite/kernels/internal/optimized/rvv_activation_utils.h"
 #include "tflite/kernels/internal/types.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 
 namespace tflite {
 namespace reference_ops {
@@ -55,6 +57,19 @@ template <typename T>
 inline void Gelu(const RuntimeShape& input_shape, const T* input_data,
                  bool approximate, const RuntimeShape& output_shape,
                  T* output_data) {
+#ifdef USE_RVV
+  if constexpr (std::is_same<T, float>::value) {
+    const int flat_size = MatchingFlatSize(input_shape, output_shape);
+    if (approximate) {
+      rvv_ops::UnaryFloatTransform(flat_size, input_data, output_data,
+                                   GeluTransformApproximate);
+    } else {
+      rvv_ops::UnaryFloatTransform(flat_size, input_data, output_data,
+                                   GeluTransform);
+    }
+    return;
+  }
+#endif
   using VectorType = Eigen::VectorX<T>;
   auto input_map = VectorType::Map(input_data, input_shape.FlatSize());
   auto output_map = VectorType::Map(output_data, output_shape.FlatSize());

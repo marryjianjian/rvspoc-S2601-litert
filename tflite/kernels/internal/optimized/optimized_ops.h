@@ -43,7 +43,6 @@ limitations under the License.
 #endif
 
 #include "Eigen/Core"  // from @eigen_archive
-#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "fixedpoint/fixedpoint.h"
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/core/c/common.h"
@@ -54,10 +53,11 @@ limitations under the License.
 #include "tflite/kernels/internal/cppmath.h"
 #include "tflite/kernels/internal/optimized/im2col_utils.h"
 #include "tflite/kernels/internal/optimized/neon_check.h"
+#include "tflite/kernels/internal/optimized/optimized_ops_utils.h"
+#include "tflite/kernels/internal/optimized/rvv_activation_utils.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/optimized/rvv_ops.h"
 #include "tflite/kernels/internal/optimized/rvv_tensor_utils.h"
-#include "tflite/kernels/internal/optimized/optimized_ops_utils.h"
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/strided_slice_logic.h"
@@ -65,6 +65,7 @@ limitations under the License.
 #include "tflite/kernels/internal/tensor_utils.h"
 #include "tflite/kernels/internal/transpose_utils.h"
 #include "tflite/kernels/internal/types.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 
 #if __aarch64__ && __clang__
 #define TFLITE_SOFTMAX_USE_UINT16_LUT
@@ -1434,12 +1435,9 @@ inline void LeakyRelu(const tflite::LeakyReluParams& params,
 #if defined(USE_RVV)
   for (; i < flat_size;) {
     const size_t vl = __riscv_vsetvl_e32m4(flat_size - i);
-    const vfloat32m4_t input =
-        __riscv_vle32_v_f32m4(input_data + i, vl);
-    const vfloat32m4_t scaled =
-        __riscv_vfmul_vf_f32m4(input, params.alpha, vl);
-    const vbool8_t positive_mask =
-        __riscv_vmfgt_vf_f32m4_b8(input, 0.0f, vl);
+    const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
+    const vfloat32m4_t scaled = __riscv_vfmul_vf_f32m4(input, params.alpha, vl);
+    const vbool8_t positive_mask = __riscv_vmfgt_vf_f32m4_b8(input, 0.0f, vl);
     const vfloat32m4_t output =
         __riscv_vmerge_vvm_f32m4(scaled, input, positive_mask, vl);
     __riscv_vse32_v_f32m4(output_data + i, output, vl);
@@ -1486,8 +1484,8 @@ inline void ReluX(const tflite::ReluParams& params,
       const size_t vl = __riscv_vsetvl_e8m1(flat_size - i);
       const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input_data + i, vl);
       const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
-      vint32m4_t output = __riscv_vsub_vx_i32m4(
-          __riscv_vreinterpret_v_u32m4_i32m4(
+      vint32m4_t output =
+          __riscv_vsub_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
               __riscv_vzext_vf2_u32m4(input_u16, vl)),
           params.input_offset, vl);
       output = rvv_ops::MultiplyByQuantizedMultiplier(
@@ -1796,18 +1794,16 @@ inline void AddElementwise(int size, const ArithmeticParams& params,
 #elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
   for (; i < size;) {
     const size_t vl = __riscv_vsetvl_e8m1(size - i);
-    const vuint8m1_t input1_u8 =
-        __riscv_vle8_v_u8m1(input1_data + i, vl);
-    const vuint8m1_t input2_u8 =
-        __riscv_vle8_v_u8m1(input2_data + i, vl);
+    const vuint8m1_t input1_u8 = __riscv_vle8_v_u8m1(input1_data + i, vl);
+    const vuint8m1_t input2_u8 = __riscv_vle8_v_u8m1(input2_data + i, vl);
     const vuint16m2_t input1_u16 = __riscv_vzext_vf2_u16m2(input1_u8, vl);
     const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
-    const vint32m4_t input1 = __riscv_vadd_vx_i32m4(
-        __riscv_vreinterpret_v_u32m4_i32m4(
+    const vint32m4_t input1 =
+        __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
             __riscv_vzext_vf2_u32m4(input1_u16, vl)),
         params.input1_offset, vl);
-    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
-        __riscv_vreinterpret_v_u32m4_i32m4(
+    const vint32m4_t input2 =
+        __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
             __riscv_vzext_vf2_u32m4(input2_u16, vl)),
         params.input2_offset, vl);
 
@@ -1817,28 +1813,25 @@ inline void AddElementwise(int size, const ArithmeticParams& params,
         __riscv_vsll_vx_i32m4(input2, params.left_shift, vl);
     const vint32m4_t scaled_input1 =
         rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
-            shifted_input1, params.input1_multiplier, params.input1_shift,
-            vl);
+            shifted_input1, params.input1_multiplier, params.input1_shift, vl);
     const vint32m4_t scaled_input2 =
         rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
-            shifted_input2, params.input2_multiplier, params.input2_shift,
-            vl);
+            shifted_input2, params.input2_multiplier, params.input2_shift, vl);
     const vint32m4_t raw_sum =
         __riscv_vadd_vv_i32m4(scaled_input1, scaled_input2, vl);
     vint32m4_t raw_output =
         rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
             raw_sum, params.output_multiplier, params.output_shift, vl);
+    raw_output = __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
     raw_output =
-        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
-    raw_output = __riscv_vmax_vx_i32m4(
-        raw_output, params.quantized_activation_min, vl);
-    raw_output = __riscv_vmin_vx_i32m4(
-        raw_output, params.quantized_activation_max, vl);
+        __riscv_vmax_vx_i32m4(raw_output, params.quantized_activation_min, vl);
+    raw_output =
+        __riscv_vmin_vx_i32m4(raw_output, params.quantized_activation_max, vl);
 
     const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
     const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
-    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
-                        narrowed_i8, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i), narrowed_i8,
+                        vl);
     i += vl;
   }
 #endif  // NEON
@@ -1948,35 +1941,32 @@ inline void AddScalarBroadcast(int size, const ArithmeticParams& params,
 
   for (; i < size;) {
     const size_t vl = __riscv_vsetvl_e8m1(size - i);
-    const vuint8m1_t input2_u8 =
-        __riscv_vle8_v_u8m1(input2_data + i, vl);
+    const vuint8m1_t input2_u8 = __riscv_vle8_v_u8m1(input2_data + i, vl);
     const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
-    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
-        __riscv_vreinterpret_v_u32m4_i32m4(
+    const vint32m4_t input2 =
+        __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
             __riscv_vzext_vf2_u32m4(input2_u16, vl)),
         params.input2_offset, vl);
     const vint32m4_t shifted_input2 =
         __riscv_vsll_vx_i32m4(input2, params.left_shift, vl);
     const vint32m4_t scaled_input2 =
         rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
-            shifted_input2, params.input2_multiplier, params.input2_shift,
-            vl);
+            shifted_input2, params.input2_multiplier, params.input2_shift, vl);
     const vint32m4_t raw_sum =
         __riscv_vadd_vx_i32m4(scaled_input2, scaled_input1_val, vl);
     vint32m4_t raw_output =
         rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
             raw_sum, params.output_multiplier, params.output_shift, vl);
+    raw_output = __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
     raw_output =
-        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
-    raw_output = __riscv_vmax_vx_i32m4(
-        raw_output, params.quantized_activation_min, vl);
-    raw_output = __riscv_vmin_vx_i32m4(
-        raw_output, params.quantized_activation_max, vl);
+        __riscv_vmax_vx_i32m4(raw_output, params.quantized_activation_min, vl);
+    raw_output =
+        __riscv_vmin_vx_i32m4(raw_output, params.quantized_activation_max, vl);
 
     const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
     const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
-    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
-                        narrowed_i8, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i), narrowed_i8,
+                        vl);
     i += vl;
   }
 #endif  // NEON
@@ -2488,34 +2478,31 @@ inline void MulElementwise(int size, const ArithmeticParams& params,
 #elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
   for (; i < size;) {
     const size_t vl = __riscv_vsetvl_e8m1(size - i);
-    const vuint8m1_t input1_u8 =
-        __riscv_vle8_v_u8m1(input1_data + i, vl);
-    const vuint8m1_t input2_u8 =
-        __riscv_vle8_v_u8m1(input2_data + i, vl);
+    const vuint8m1_t input1_u8 = __riscv_vle8_v_u8m1(input1_data + i, vl);
+    const vuint8m1_t input2_u8 = __riscv_vle8_v_u8m1(input2_data + i, vl);
     const vuint16m2_t input1_u16 = __riscv_vzext_vf2_u16m2(input1_u8, vl);
     const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
-    const vint32m4_t input1 = __riscv_vadd_vx_i32m4(
-        __riscv_vreinterpret_v_u32m4_i32m4(
+    const vint32m4_t input1 =
+        __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
             __riscv_vzext_vf2_u32m4(input1_u16, vl)),
         params.input1_offset, vl);
-    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
-        __riscv_vreinterpret_v_u32m4_i32m4(
+    const vint32m4_t input2 =
+        __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
             __riscv_vzext_vf2_u32m4(input2_u16, vl)),
         params.input2_offset, vl);
     const vint32m4_t product = __riscv_vmul_vv_i32m4(input1, input2, vl);
     vint32m4_t raw_output = rvv_ops::MultiplyByQuantizedMultiplier(
         product, params.output_multiplier, params.output_shift, vl);
+    raw_output = __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
     raw_output =
-        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
-    raw_output = __riscv_vmax_vx_i32m4(
-        raw_output, params.quantized_activation_min, vl);
-    raw_output = __riscv_vmin_vx_i32m4(
-        raw_output, params.quantized_activation_max, vl);
+        __riscv_vmax_vx_i32m4(raw_output, params.quantized_activation_min, vl);
+    raw_output =
+        __riscv_vmin_vx_i32m4(raw_output, params.quantized_activation_max, vl);
 
     const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
     const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
-    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
-                        narrowed_i8, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i), narrowed_i8,
+                        vl);
     i += vl;
   }
 #endif  // NEON / USE_RVV
@@ -2592,28 +2579,25 @@ inline void MulSimpleBroadcast(int size, const ArithmeticParams& params,
 #elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
   for (; i < size;) {
     const size_t vl = __riscv_vsetvl_e8m1(size - i);
-    const vuint8m1_t input2_u8 =
-        __riscv_vle8_v_u8m1(input2_data + i, vl);
+    const vuint8m1_t input2_u8 = __riscv_vle8_v_u8m1(input2_data + i, vl);
     const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
-    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
-        __riscv_vreinterpret_v_u32m4_i32m4(
+    const vint32m4_t input2 =
+        __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
             __riscv_vzext_vf2_u32m4(input2_u16, vl)),
         params.input2_offset, vl);
-    const vint32m4_t product =
-        __riscv_vmul_vx_i32m4(input2, input1_val, vl);
+    const vint32m4_t product = __riscv_vmul_vx_i32m4(input2, input1_val, vl);
     vint32m4_t raw_output = rvv_ops::MultiplyByQuantizedMultiplier(
         product, params.output_multiplier, params.output_shift, vl);
+    raw_output = __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
     raw_output =
-        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
-    raw_output = __riscv_vmax_vx_i32m4(
-        raw_output, params.quantized_activation_min, vl);
-    raw_output = __riscv_vmin_vx_i32m4(
-        raw_output, params.quantized_activation_max, vl);
+        __riscv_vmax_vx_i32m4(raw_output, params.quantized_activation_min, vl);
+    raw_output =
+        __riscv_vmin_vx_i32m4(raw_output, params.quantized_activation_max, vl);
 
     const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
     const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
-    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
-                        narrowed_i8, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i), narrowed_i8,
+                        vl);
     i += vl;
   }
 #endif  // NEON / USE_RVV
@@ -2742,10 +2726,8 @@ inline void DivElementwise(int size, const ArithmeticParams& params,
 #if defined(USE_RVV)
   for (; i < size;) {
     const size_t vl = __riscv_vsetvl_e32m4(size - i);
-    const vfloat32m4_t input1 =
-        __riscv_vle32_v_f32m4(input1_data + i, vl);
-    const vfloat32m4_t input2 =
-        __riscv_vle32_v_f32m4(input2_data + i, vl);
+    const vfloat32m4_t input1 = __riscv_vle32_v_f32m4(input1_data + i, vl);
+    const vfloat32m4_t input2 = __riscv_vle32_v_f32m4(input2_data + i, vl);
     vfloat32m4_t output = __riscv_vfdiv_vv_f32m4(input1, input2, vl);
     output = __riscv_vfmax_vf_f32m4(output, output_activation_min, vl);
     output = __riscv_vfmin_vf_f32m4(output, output_activation_max, vl);
@@ -2782,10 +2764,8 @@ inline void DivElementwise(int size, const ArithmeticParams& params,
 #if defined(USE_RVV)
   for (; i < size;) {
     const size_t vl = __riscv_vsetvl_e32m4(size - i);
-    const vint32m4_t input1 =
-        __riscv_vle32_v_i32m4(input1_data + i, vl);
-    const vint32m4_t input2 =
-        __riscv_vle32_v_i32m4(input2_data + i, vl);
+    const vint32m4_t input1 = __riscv_vle32_v_i32m4(input1_data + i, vl);
+    const vint32m4_t input2 = __riscv_vle32_v_i32m4(input2_data + i, vl);
     vint32m4_t output = __riscv_vdiv_vv_i32m4(input1, input2, vl);
     output = __riscv_vmax_vx_i32m4(output, output_activation_min, vl);
     output = __riscv_vmin_vx_i32m4(output, output_activation_max, vl);
@@ -3009,18 +2989,16 @@ inline void SubElementwise(int size, const ArithmeticParams& params,
 #if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
   for (; i < size;) {
     const size_t vl = __riscv_vsetvl_e8m1(size - i);
-    const vuint8m1_t input1_u8 =
-        __riscv_vle8_v_u8m1(input1_data + i, vl);
-    const vuint8m1_t input2_u8 =
-        __riscv_vle8_v_u8m1(input2_data + i, vl);
+    const vuint8m1_t input1_u8 = __riscv_vle8_v_u8m1(input1_data + i, vl);
+    const vuint8m1_t input2_u8 = __riscv_vle8_v_u8m1(input2_data + i, vl);
     const vuint16m2_t input1_u16 = __riscv_vzext_vf2_u16m2(input1_u8, vl);
     const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
-    const vint32m4_t input1 = __riscv_vadd_vx_i32m4(
-        __riscv_vreinterpret_v_u32m4_i32m4(
+    const vint32m4_t input1 =
+        __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
             __riscv_vzext_vf2_u32m4(input1_u16, vl)),
         params.input1_offset, vl);
-    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
-        __riscv_vreinterpret_v_u32m4_i32m4(
+    const vint32m4_t input2 =
+        __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
             __riscv_vzext_vf2_u32m4(input2_u16, vl)),
         params.input2_offset, vl);
 
@@ -3030,28 +3008,25 @@ inline void SubElementwise(int size, const ArithmeticParams& params,
         __riscv_vsll_vx_i32m4(input2, params.left_shift, vl);
     const vint32m4_t scaled_input1 =
         rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
-            shifted_input1, params.input1_multiplier, params.input1_shift,
-            vl);
+            shifted_input1, params.input1_multiplier, params.input1_shift, vl);
     const vint32m4_t scaled_input2 =
         rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
-            shifted_input2, params.input2_multiplier, params.input2_shift,
-            vl);
+            shifted_input2, params.input2_multiplier, params.input2_shift, vl);
     const vint32m4_t raw_sub =
         __riscv_vsub_vv_i32m4(scaled_input1, scaled_input2, vl);
     vint32m4_t raw_output =
         rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
             raw_sub, params.output_multiplier, params.output_shift, vl);
+    raw_output = __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
     raw_output =
-        __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
-    raw_output = __riscv_vmax_vx_i32m4(
-        raw_output, params.quantized_activation_min, vl);
-    raw_output = __riscv_vmin_vx_i32m4(
-        raw_output, params.quantized_activation_max, vl);
+        __riscv_vmax_vx_i32m4(raw_output, params.quantized_activation_min, vl);
+    raw_output =
+        __riscv_vmin_vx_i32m4(raw_output, params.quantized_activation_max, vl);
 
     const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
     const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
-    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
-                        narrowed_i8, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i), narrowed_i8,
+                        vl);
     i += vl;
   }
 #endif  // defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
@@ -3090,10 +3065,12 @@ inline void Sub(const ArithmeticParams& params,
 
 #ifdef USE_RVV
 template <>
-inline void SubWithActivation<float>(
-    const ArithmeticParams& params, const RuntimeShape& input1_shape,
-    const float* input1_data, const RuntimeShape& input2_shape,
-    const float* input2_data, const RuntimeShape& output_shape,
+inline void SubWithActivation<float>(const ArithmeticParams& params,
+                                     const RuntimeShape& input1_shape,
+                                     const float* input1_data,
+                                     const RuntimeShape& input2_shape,
+                                     const float* input2_data,
+                                     const RuntimeShape& output_shape,
     float* output_data) {
   ruy::profiler::ScopeLabel label("SubWithActivation_optimized/RVV");
   TFLITE_DCHECK_EQ(input1_shape.FlatSize(), input2_shape.FlatSize());
@@ -3600,18 +3577,16 @@ inline bool AveragePool(const PoolParams& params,
               const int in_y = in_y_origin + filter_y;
               const float* input_ptr =
                   input_data + Offset(input_shape, batch, in_y, in_x, channel);
-              const vfloat32m4_t input =
-                  __riscv_vle32_v_f32m4(input_ptr, vl);
+              const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_ptr, vl);
               sum = __riscv_vfadd_vv_f32m4(sum, input, vl);
             }
           }
           vfloat32m4_t output =
-              __riscv_vfdiv_vf_f32m4(sum, static_cast<float>(filter_count),
-                                     vl);
-          output = __riscv_vfmax_vf_f32m4(
-              output, params.float_activation_min, vl);
-          output = __riscv_vfmin_vf_f32m4(
-              output, params.float_activation_max, vl);
+              __riscv_vfdiv_vf_f32m4(sum, static_cast<float>(filter_count), vl);
+          output =
+              __riscv_vfmax_vf_f32m4(output, params.float_activation_min, vl);
+          output =
+              __riscv_vfmin_vf_f32m4(output, params.float_activation_max, vl);
           __riscv_vse32_v_f32m4(
               output_data + Offset(output_shape, batch, out_y, out_x, channel),
               output, vl);
@@ -3858,8 +3833,8 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
             std::min(params.filter_height, input_height - in_y_origin);
         for (int channel = 0; channel < depth;) {
           const size_t vl = __riscv_vsetvl_e32m4(depth - channel);
-          vfloat32m4_t output = __riscv_vfmv_v_f_f32m4(
-              std::numeric_limits<float>::lowest(), vl);
+          vfloat32m4_t output =
+              __riscv_vfmv_v_f_f32m4(std::numeric_limits<float>::lowest(), vl);
           for (int filter_y = filter_y_start; filter_y < filter_y_end;
                ++filter_y) {
             for (int filter_x = filter_x_start; filter_x < filter_x_end;
@@ -3868,15 +3843,14 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
               const int in_y = in_y_origin + filter_y;
               const float* input_ptr =
                   input_data + Offset(input_shape, batch, in_y, in_x, channel);
-              const vfloat32m4_t input =
-                  __riscv_vle32_v_f32m4(input_ptr, vl);
+              const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_ptr, vl);
               output = __riscv_vfmax_vv_f32m4(output, input, vl);
             }
           }
-          output = __riscv_vfmax_vf_f32m4(
-              output, params.float_activation_min, vl);
-          output = __riscv_vfmin_vf_f32m4(
-              output, params.float_activation_max, vl);
+          output =
+              __riscv_vfmax_vf_f32m4(output, params.float_activation_min, vl);
+          output =
+              __riscv_vfmin_vf_f32m4(output, params.float_activation_max, vl);
           __riscv_vse32_v_f32m4(
               output_data + Offset(output_shape, batch, out_y, out_x, channel),
               output, vl);
@@ -4008,8 +3982,8 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
                     __riscv_vle8_v_u8m1(acc + channel, vl);
                 const vuint8m1_t input =
                     __riscv_vle8_v_u8m1(input_channel_ptr, vl);
-                __riscv_vse8_v_u8m1(
-                    acc + channel, __riscv_vmaxu_vv_u8m1(acc_reg, input, vl),
+                __riscv_vse8_v_u8m1(acc + channel,
+                                    __riscv_vmaxu_vv_u8m1(acc_reg, input, vl),
                     vl);
                 input_channel_ptr += vl;
                 channel += vl;
@@ -4041,10 +4015,10 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
           for (; channel < tranche_depth;) {
             const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
             vuint8m1_t output = __riscv_vle8_v_u8m1(acc + channel, vl);
-            output = __riscv_vminu_vx_u8m1(
-                output, params.quantized_activation_max, vl);
-            output = __riscv_vmaxu_vx_u8m1(
-                output, params.quantized_activation_min, vl);
+            output = __riscv_vminu_vx_u8m1(output,
+                                           params.quantized_activation_max, vl);
+            output = __riscv_vmaxu_vx_u8m1(output,
+                                           params.quantized_activation_min, vl);
             __riscv_vse8_v_u8m1(output_ptr + channel, output, vl);
             channel += vl;
           }
@@ -4103,20 +4077,18 @@ inline void L2Pool(const PoolParams& params, const RuntimeShape& input_shape,
               const int in_y = in_y_origin + filter_y;
               const float* input_ptr =
                   input_data + Offset(input_shape, batch, in_y, in_x, channel);
-              const vfloat32m4_t input =
-                  __riscv_vle32_v_f32m4(input_ptr, vl);
+              const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_ptr, vl);
               sum_squares =
                   __riscv_vfmacc_vv_f32m4(sum_squares, input, input, vl);
             }
           }
-          vfloat32m4_t output =
-              __riscv_vfdiv_vf_f32m4(sum_squares,
-                                     static_cast<float>(filter_count), vl);
+          vfloat32m4_t output = __riscv_vfdiv_vf_f32m4(
+              sum_squares, static_cast<float>(filter_count), vl);
           output = __riscv_vfsqrt_v_f32m4(output, vl);
-          output = __riscv_vfmax_vf_f32m4(
-              output, params.float_activation_min, vl);
-          output = __riscv_vfmin_vf_f32m4(
-              output, params.float_activation_max, vl);
+          output =
+              __riscv_vfmax_vf_f32m4(output, params.float_activation_min, vl);
+          output =
+              __riscv_vfmin_vf_f32m4(output, params.float_activation_max, vl);
           __riscv_vse32_v_f32m4(
               output_data + Offset(output_shape, batch, out_y, out_x, channel),
               output, vl);
@@ -4781,6 +4753,13 @@ template <typename T>
 inline void Logistic(const RuntimeShape& input_shape, const T* input_data,
                      const RuntimeShape& output_shape, T* output_data) {
   ruy::profiler::ScopeLabel label("Logistic");
+#ifdef USE_RVV
+  if constexpr (std::is_same<T, float>::value) {
+    rvv_ops::LogisticFloat(MatchingFlatSize(input_shape, output_shape),
+                           input_data, output_data);
+    return;
+  }
+#endif
   auto input_map = MapAsVector(input_data, input_shape);
   auto output_map = MapAsVector(output_data, output_shape);
   output_map.array() =
@@ -4896,6 +4875,13 @@ template <typename T>
 inline void Tanh(const RuntimeShape& input_shape, const T* input_data,
                  const RuntimeShape& output_shape, T* output_data) {
   ruy::profiler::ScopeLabel label("Tanh");
+#ifdef USE_RVV
+  if constexpr (std::is_same<T, float>::value) {
+    rvv_ops::TanhFloat(MatchingFlatSize(input_shape, output_shape), input_data,
+                       output_data);
+    return;
+  }
+#endif
   auto input_map = MapAsVector(input_data, input_shape);
   auto output_map = MapAsVector(output_data, output_shape);
   output_map.array() = input_map.array().tanh();
@@ -6553,10 +6539,10 @@ inline void Requantize(const input_type* input_data, int32_t size,
     vint32m4_t output = rvv_ops::MultiplyByQuantizedMultiplier(
         input, effective_scale_multiplier, effective_scale_shift, vl);
     output = __riscv_vadd_vx_i32m4(output, output_zeropoint, vl);
-    output = __riscv_vmax_vx_i32m4(
-        output, std::numeric_limits<output_type>::min(), vl);
-    output = __riscv_vmin_vx_i32m4(
-        output, std::numeric_limits<output_type>::max(), vl);
+    output = __riscv_vmax_vx_i32m4(output,
+                                   std::numeric_limits<output_type>::min(), vl);
+    output = __riscv_vmin_vx_i32m4(output,
+                                   std::numeric_limits<output_type>::max(), vl);
 
     if constexpr (std::is_same<output_type, int8_t>::value) {
       const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
@@ -6614,8 +6600,8 @@ inline void Requantize<int8_t, uint8_t>(const int8_t* input_data, int32_t size,
     output = __riscv_vmin_vx_i32m4(output, kMaxOutput, vl);
     const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
     const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
-    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
-                        narrowed_i8, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i), narrowed_i8,
+                        vl);
     i += vl;
   }
   return;
@@ -6713,8 +6699,8 @@ inline void Requantize<uint8_t, int8_t>(const uint8_t* input_data, int32_t size,
     const size_t vl = __riscv_vsetvl_e8m1(size - i);
     const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input_data + i, vl);
     const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
-    vint32m4_t input = __riscv_vsub_vx_i32m4(
-        __riscv_vreinterpret_v_u32m4_i32m4(
+    vint32m4_t input =
+        __riscv_vsub_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
             __riscv_vzext_vf2_u32m4(input_u16, vl)),
         input_zeropoint, vl);
     vint32m4_t output = rvv_ops::MultiplyByQuantizedMultiplier(
@@ -6910,8 +6896,8 @@ inline void Requantize<uint8_t, uint8_t>(
     const size_t vl = __riscv_vsetvl_e8m1(size - i);
     const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input_data + i, vl);
     const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
-    vint32m4_t input = __riscv_vsub_vx_i32m4(
-        __riscv_vreinterpret_v_u32m4_i32m4(
+    vint32m4_t input =
+        __riscv_vsub_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
             __riscv_vzext_vf2_u32m4(input_u16, vl)),
         input_zeropoint, vl);
     vint32m4_t output = rvv_ops::MultiplyByQuantizedMultiplier(
@@ -6921,8 +6907,8 @@ inline void Requantize<uint8_t, uint8_t>(
     output = __riscv_vmin_vx_i32m4(output, kMaxOutput, vl);
     const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
     const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
-    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
-                        narrowed_i8, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i), narrowed_i8,
+                        vl);
     i += vl;
   }
   return;
@@ -7073,6 +7059,20 @@ inline void HardSwish(const RuntimeShape& input_shape, const float* input_data,
     const float in = input_data[i];
     output_data[i] =
         in * std::min(6.0f, std::max(0.0f, in + 3.0f)) * (1.0f / 6.0f);
+  }
+}
+
+inline void Swish(const RuntimeShape& input_shape, const float* input_data,
+                  const RuntimeShape& output_shape, float* output_data) {
+  ruy::profiler::ScopeLabel label("Swish/Float");
+  const int flat_size = MatchingFlatSize(input_shape, output_shape);
+#ifdef USE_RVV
+  rvv_ops::SwishFloat(flat_size, input_data, output_data);
+  return;
+#endif
+  for (int i = 0; i < flat_size; ++i) {
+    const float input = input_data[i];
+    output_data[i] = input * rvv_ops::LogisticFloatValue(input);
   }
 }
 
@@ -7612,8 +7612,8 @@ inline void AffineQuantize(const tflite::QuantizationParams& op_params,
     quantized = __riscv_vmin_vx_i32m4(quantized, max_val, vl);
     const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(quantized, 0, vl);
     const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
-    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i),
-                        narrowed_i8, vl);
+    __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_data + i), narrowed_i8,
+                        vl);
     i += vl;
   }
 #endif  // USE_RVV
@@ -8505,10 +8505,8 @@ inline void PReluScalarBroadcast(int size, const ArithmeticParams& params,
   for (; i < size;) {
     const size_t vl = __riscv_vsetvl_e32m4(size - i);
     const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
-    const vfloat32m4_t scaled =
-        __riscv_vfmul_vf_f32m4(input, alpha, vl);
-    const vbool8_t positive_mask =
-        __riscv_vmfge_vf_f32m4_b8(input, 0.0f, vl);
+    const vfloat32m4_t scaled = __riscv_vfmul_vf_f32m4(input, alpha, vl);
+    const vbool8_t positive_mask = __riscv_vmfge_vf_f32m4_b8(input, 0.0f, vl);
     const vfloat32m4_t output =
         __riscv_vmerge_vvm_f32m4(scaled, input, positive_mask, vl);
     __riscv_vse32_v_f32m4(output_data + i, output, vl);
@@ -8571,14 +8569,10 @@ inline void PReluElementWise(int flat_size, const ArithmeticParams& params,
 #elif defined(USE_RVV)
   for (; i < flat_size;) {
     const size_t vl = __riscv_vsetvl_e32m4(flat_size - i);
-    const vfloat32m4_t input =
-        __riscv_vle32_v_f32m4(input_data + i, vl);
-    const vfloat32m4_t alpha =
-        __riscv_vle32_v_f32m4(alpha_data + i, vl);
-    const vfloat32m4_t scaled =
-        __riscv_vfmul_vv_f32m4(input, alpha, vl);
-    const vbool8_t positive_mask =
-        __riscv_vmfge_vf_f32m4_b8(input, 0.0f, vl);
+    const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
+    const vfloat32m4_t alpha = __riscv_vle32_v_f32m4(alpha_data + i, vl);
+    const vfloat32m4_t scaled = __riscv_vfmul_vv_f32m4(input, alpha, vl);
+    const vbool8_t positive_mask = __riscv_vmfge_vf_f32m4_b8(input, 0.0f, vl);
     const vfloat32m4_t output =
         __riscv_vmerge_vvm_f32m4(scaled, input, positive_mask, vl);
     __riscv_vse32_v_f32m4(output_data + i, output, vl);
@@ -8859,8 +8853,7 @@ inline int RvvArgMinMaxValueFirstIndexFloat(const float* input_data, int size) {
                                     : std::numeric_limits<float>::max();
   for (int i = 0; i < size;) {
     const size_t vl = __riscv_vsetvl_e32m4(size - i);
-    const vfloat32m4_t input =
-        __riscv_vle32_v_f32m4(input_data + i, vl);
+    const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
     vfloat32m1_t scalar = __riscv_vfmv_v_f_f32m1(selected_value, 1);
     if constexpr (is_arg_max) {
       scalar = __riscv_vfredmax_vs_f32m4_f32m1(input, scalar, vl);
@@ -8893,8 +8886,8 @@ inline void ArgMinMaxLastAxis(const RuntimeShape& input_shape,
   for (int outer = 0; outer < outer_size; ++outer) {
 #if defined(USE_RVV)
     if constexpr (std::is_same<T1, float>::value) {
-      output_data[outer] = static_cast<T2>(
-          RvvArgMinMaxValueFirstIndexFloat<is_arg_max>(
+      output_data[outer] =
+          static_cast<T2>(RvvArgMinMaxValueFirstIndexFloat<is_arg_max>(
               input_data + outer * axis_size, axis_size));
       continue;
     }
