@@ -17,8 +17,10 @@ limitations under the License.
 
 // RISC-V Vector Extension (RVV 1.0) detection
 // Requires TFLITE_RISCV_RVV to be defined (set by CMake via -DTFLITE_RISCV_RVV)
-// to be consistent with arch_check.h detection.
-#if defined(__riscv) && defined(__riscv_vector) && defined(TFLITE_RISCV_RVV)
+// to be consistent with arch_check.h detection. TFLITE_DISABLE_RISCV_RVV lets
+// benchmark targets build a scalar baseline in an RVV-enabled configuration.
+#if defined(__riscv) && defined(__riscv_vector) && defined(TFLITE_RISCV_RVV) && \
+    !defined(TFLITE_DISABLE_RISCV_RVV)
 #define USE_RVV
 #include <riscv_vector.h>  // IWYU pragma: export
 #endif

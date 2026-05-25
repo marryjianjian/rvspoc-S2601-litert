@@ -31,7 +31,8 @@ limitations under the License.
 #endif
 
 // RISC-V Vector Extension (RVV 1.0) detection
-#if defined(__riscv) && defined(__riscv_vector) && defined(TFLITE_RISCV_RVV)
+#if defined(__riscv) && defined(__riscv_vector) && defined(TFLITE_RISCV_RVV) && \
+    !defined(TFLITE_DISABLE_RISCV_RVV)
 #define TFLITE_USE_RVV
 #include <riscv_vector.h>
 #endif

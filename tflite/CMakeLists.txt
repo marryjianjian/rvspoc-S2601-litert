@@ -769,6 +769,7 @@ if(_TFLITE_ENABLE_MMAP)
 else()
   list(FILTER _ALL_TFLITE_SRCS EXCLUDE REGEX ".*mmap_allocation\\.cc$")
 endif()
+list(FILTER _ALL_TFLITE_SRCS EXCLUDE REGEX ".*/rvv_model_benchmark\\.cc$")
 
 add_library(tensorflow-lite
   ${_ALL_TFLITE_SRCS}
@@ -836,6 +837,67 @@ if(TFLITE_ENABLE_RVV_TESTS)
       COMMAND tensorflow-lite-rvv-ops-test
     )
   endif()
+
+  set(TFLITE_NO_RVV_TARGET_PUBLIC_OPTIONS ${TFLITE_TARGET_PUBLIC_OPTIONS})
+  list(REMOVE_ITEM TFLITE_NO_RVV_TARGET_PUBLIC_OPTIONS "-DTFLITE_RISCV_RVV")
+  list(APPEND TFLITE_NO_RVV_TARGET_PUBLIC_OPTIONS "-DTFLITE_DISABLE_RISCV_RVV")
+  if(TFLITE_RISCV64)
+    list(APPEND TFLITE_NO_RVV_TARGET_PUBLIC_OPTIONS "-march=rv64gc")
+  endif()
+
+  add_library(tensorflow-lite-norvv STATIC
+    ${_ALL_TFLITE_SRCS}
+  )
+  target_include_directories(tensorflow-lite-norvv
+    PUBLIC
+      $<BUILD_INTERFACE:${TENSORFLOW_SOURCE_DIR}>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+  )
+  target_link_libraries(tensorflow-lite-norvv
+    PUBLIC
+      Eigen3::Eigen
+      absl::flags
+      absl::hash
+      absl::status
+      absl::strings
+      absl::synchronization
+      absl::variant
+      farmhash
+      fft2d_fftsg2d
+      flatbuffers::flatbuffers
+      gemmlowp::gemmlowp
+      ml_dtypes
+      ruy::ruy
+      ${CMAKE_DL_LIBS}
+      ${TFLITE_TARGET_DEPENDENCIES}
+  )
+  target_compile_options(tensorflow-lite-norvv
+    PUBLIC ${TFLITE_NO_RVV_TARGET_PUBLIC_OPTIONS}
+    PRIVATE ${TFLITE_TARGET_PRIVATE_OPTIONS}
+  )
+  target_compile_definitions(tensorflow-lite-norvv
+    PRIVATE
+      TF_MAJOR_VERSION=2
+      TF_MINOR_VERSION=19
+      TF_PATCH_VERSION=0
+      TF_VERSION_SUFFIX=""
+  )
+
+  add_executable(tensorflow-lite-rvv-model-benchmark
+    ${TFLITE_SOURCE_DIR}/kernels/internal/optimized/rvv_model_benchmark.cc
+  )
+  target_link_libraries(tensorflow-lite-rvv-model-benchmark
+    tensorflow-lite
+  )
+
+  add_executable(tensorflow-lite-rvv-model-benchmark-norvv
+    ${TFLITE_SOURCE_DIR}/kernels/internal/optimized/rvv_model_benchmark.cc
+  )
+  target_link_libraries(tensorflow-lite-rvv-model-benchmark-norvv
+    tensorflow-lite-norvv
+  )
 endif()
 
 # The install targets.
