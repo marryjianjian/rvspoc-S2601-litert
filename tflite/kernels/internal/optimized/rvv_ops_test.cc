@@ -22,6 +22,7 @@ limitations under the License.
 #include <limits>
 #include <vector>
 
+#include "tflite/kernels/cpu_backend_gemm.h"
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/integer_ops/add.h"
 #include "tflite/kernels/internal/optimized/integer_ops/conv.h"
@@ -36,7 +37,9 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/portable_tensor_utils.h"
 #include "tflite/kernels/internal/reference/add.h"
+#include "tflite/kernels/internal/reference/conv.h"
 #include "tflite/kernels/internal/reference/div.h"
+#include "tflite/kernels/internal/reference/fully_connected.h"
 #include "tflite/kernels/internal/reference/gelu.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
 #include "tflite/kernels/internal/reference/integer_ops/conv.h"
@@ -273,6 +276,52 @@ std::vector<int16_t> MakeInt16Input(int size, int offset) {
     values[i] = static_cast<int16_t>(((i * 2053 + offset) % 65535) - 32767);
   }
   return values;
+}
+
+template <typename LhsScalar, typename RhsScalar, typename DstScalar,
+          cpu_backend_gemm::QuantizationFlavor quantization_flavor>
+void ReferenceQuantizedCpuBackendGemm(
+    const cpu_backend_gemm::MatrixParams<LhsScalar>& lhs_params,
+    const LhsScalar* lhs_data,
+    const cpu_backend_gemm::MatrixParams<RhsScalar>& rhs_params,
+    const RhsScalar* rhs_data,
+    const cpu_backend_gemm::MatrixParams<DstScalar>& dst_params,
+    DstScalar* dst_data,
+    const cpu_backend_gemm::GemmParams<int32_t, DstScalar, quantization_flavor>&
+        params) {
+  for (int col = 0; col < dst_params.cols; ++col) {
+    for (int row = 0; row < dst_params.rows; ++row) {
+      int32_t acc = 0;
+      for (int depth = 0; depth < lhs_params.cols; ++depth) {
+        const int32_t lhs =
+            static_cast<int32_t>(lhs_data[row * lhs_params.cols + depth]) -
+            static_cast<int32_t>(lhs_params.zero_point);
+        const int32_t rhs =
+            static_cast<int32_t>(rhs_data[col * rhs_params.rows + depth]) -
+            static_cast<int32_t>(rhs_params.zero_point);
+        acc += lhs * rhs;
+      }
+      if (params.bias != nullptr) {
+        acc += params.bias[row];
+      }
+      int32_t multiplier;
+      int shift;
+      if constexpr (quantization_flavor ==
+                    cpu_backend_gemm::QuantizationFlavor::
+                        kIntegerWithPerRowMultiplier) {
+        multiplier = params.multiplier_fixedpoint_perchannel[row];
+        shift = params.multiplier_exponent_perchannel[row];
+      } else {
+        multiplier = params.multiplier_fixedpoint;
+        shift = params.multiplier_exponent;
+      }
+      acc = MultiplyByQuantizedMultiplier(acc, multiplier, shift);
+      acc += static_cast<int32_t>(dst_params.zero_point);
+      acc = std::max(acc, static_cast<int32_t>(params.clamp_min));
+      acc = std::min(acc, static_cast<int32_t>(params.clamp_max));
+      dst_data[col * dst_params.rows + row] = static_cast<DstScalar>(acc);
+    }
+  }
 }
 
 ArithmeticParams MakeInt8Params() {
@@ -790,6 +839,160 @@ TEST(RvvOpsTest, RequantizeInt32ToInt16MatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest,
+     Int8CpuBackendGemmMatchesScalarReferenceAcrossVectorBoundaries) {
+  constexpr int kRows = 7;
+  constexpr int kCols = 3;
+  cpu_backend_gemm::MatrixParams<int8_t> lhs_params;
+  lhs_params.rows = kRows;
+  lhs_params.order = cpu_backend_gemm::Order::kRowMajor;
+  lhs_params.zero_point = -5;
+  cpu_backend_gemm::MatrixParams<int8_t> rhs_params;
+  rhs_params.cols = kCols;
+  rhs_params.order = cpu_backend_gemm::Order::kColMajor;
+  rhs_params.zero_point = 7;
+  cpu_backend_gemm::MatrixParams<int8_t> dst_params;
+  dst_params.rows = kRows;
+  dst_params.cols = kCols;
+  dst_params.order = cpu_backend_gemm::Order::kColMajor;
+  dst_params.zero_point = -3;
+  cpu_backend_gemm::GemmParams<int32_t, int8_t> params;
+  params.multiplier_fixedpoint = 1234567890;
+  params.multiplier_exponent = -5;
+  params.clamp_min = -103;
+  params.clamp_max = 101;
+  const std::vector<int32_t> bias = MakeInt32Input(kRows, 389);
+  params.bias = bias.data();
+
+  for (int depth : Int8M1VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    lhs_params.cols = depth;
+    rhs_params.rows = depth;
+    std::vector<int8_t> lhs = MakeInt8Input(kRows * depth, 17);
+    std::vector<int8_t> rhs = MakeInt8Input(kCols * depth, 97);
+    lhs[0] = std::numeric_limits<int8_t>::min();
+    lhs[1 % lhs.size()] = std::numeric_limits<int8_t>::max();
+    rhs[0] = std::numeric_limits<int8_t>::min();
+    rhs[1 % rhs.size()] = std::numeric_limits<int8_t>::max();
+    std::vector<int8_t> actual(kRows * kCols);
+    std::vector<int8_t> expected(kRows * kCols);
+
+    cpu_backend_gemm::Gemm(lhs_params, lhs.data(), rhs_params, rhs.data(),
+                           dst_params, actual.data(), params, nullptr);
+    ReferenceQuantizedCpuBackendGemm(lhs_params, lhs.data(), rhs_params,
+                                     rhs.data(), dst_params, expected.data(),
+                                     params);
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest,
+     Int8CpuBackendGemmPerRowMatchesScalarReferenceAcrossVectorBoundaries) {
+  constexpr int kRows = 5;
+  constexpr int kCols = 4;
+  cpu_backend_gemm::MatrixParams<int8_t> lhs_params;
+  lhs_params.rows = kRows;
+  lhs_params.order = cpu_backend_gemm::Order::kRowMajor;
+  lhs_params.zero_point = 3;
+  cpu_backend_gemm::MatrixParams<int8_t> rhs_params;
+  rhs_params.cols = kCols;
+  rhs_params.order = cpu_backend_gemm::Order::kColMajor;
+  rhs_params.zero_point = -11;
+  cpu_backend_gemm::MatrixParams<int8_t> dst_params;
+  dst_params.rows = kRows;
+  dst_params.cols = kCols;
+  dst_params.order = cpu_backend_gemm::Order::kColMajor;
+  dst_params.zero_point = 9;
+  cpu_backend_gemm::GemmParams<
+      int32_t, int8_t,
+      cpu_backend_gemm::QuantizationFlavor::kIntegerWithPerRowMultiplier>
+      params;
+  const int32_t multiplier[kRows] = {1073741824, 1234567890, 1342177280,
+                                     987654321, 1503238554};
+  const int shift[kRows] = {-4, -3, -5, -2, -6};
+  const std::vector<int32_t> bias = MakeInt32Input(kRows, 577);
+  params.multiplier_fixedpoint_perchannel = multiplier;
+  params.multiplier_exponent_perchannel = shift;
+  params.bias = bias.data();
+  params.clamp_min = -96;
+  params.clamp_max = 111;
+
+  for (int depth : Int8M1VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    lhs_params.cols = depth;
+    rhs_params.rows = depth;
+    std::vector<int8_t> lhs = MakeInt8Input(kRows * depth, 31);
+    std::vector<int8_t> rhs = MakeInt8Input(kCols * depth, 151);
+    lhs[0] = std::numeric_limits<int8_t>::min();
+    rhs[0] = std::numeric_limits<int8_t>::max();
+    std::vector<int8_t> actual(kRows * kCols);
+    std::vector<int8_t> expected(kRows * kCols);
+
+    cpu_backend_gemm::Gemm(lhs_params, lhs.data(), rhs_params, rhs.data(),
+                           dst_params, actual.data(), params, nullptr);
+    ReferenceQuantizedCpuBackendGemm(lhs_params, lhs.data(), rhs_params,
+                                     rhs.data(), dst_params, expected.data(),
+                                     params);
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest,
+     Uint8CpuBackendGemmMatchesScalarReferenceAcrossVectorBoundaries) {
+  constexpr int kRows = 7;
+  constexpr int kCols = 3;
+  cpu_backend_gemm::MatrixParams<uint8_t> lhs_params;
+  lhs_params.rows = kRows;
+  lhs_params.order = cpu_backend_gemm::Order::kRowMajor;
+  lhs_params.zero_point = 127;
+  cpu_backend_gemm::MatrixParams<uint8_t> rhs_params;
+  rhs_params.cols = kCols;
+  rhs_params.order = cpu_backend_gemm::Order::kColMajor;
+  rhs_params.zero_point = 119;
+  cpu_backend_gemm::MatrixParams<uint8_t> dst_params;
+  dst_params.rows = kRows;
+  dst_params.cols = kCols;
+  dst_params.order = cpu_backend_gemm::Order::kColMajor;
+  dst_params.zero_point = 121;
+  cpu_backend_gemm::GemmParams<int32_t, uint8_t> params;
+  params.multiplier_fixedpoint = 1325400064;
+  params.multiplier_exponent = -4;
+  params.clamp_min = 13;
+  params.clamp_max = 239;
+  const std::vector<int32_t> bias = MakeInt32Input(kRows, 719);
+  params.bias = bias.data();
+
+  for (int depth : Int8M1VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    lhs_params.cols = depth;
+    rhs_params.rows = depth;
+    std::vector<uint8_t> lhs = MakeUint8Input(kRows * depth, 41);
+    std::vector<uint8_t> rhs = MakeUint8Input(kCols * depth, 211);
+    lhs[0] = std::numeric_limits<uint8_t>::min();
+    lhs[1 % lhs.size()] = std::numeric_limits<uint8_t>::max();
+    rhs[0] = std::numeric_limits<uint8_t>::min();
+    rhs[1 % rhs.size()] = std::numeric_limits<uint8_t>::max();
+    std::vector<uint8_t> actual(kRows * kCols);
+    std::vector<uint8_t> expected(kRows * kCols);
+
+    cpu_backend_gemm::Gemm(lhs_params, lhs.data(), rhs_params, rhs.data(),
+                           dst_params, actual.data(), params, nullptr);
+    ReferenceQuantizedCpuBackendGemm(lhs_params, lhs.data(), rhs_params,
+                                     rhs.data(), dst_params, expected.data(),
+                                     params);
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
+  }
+}
+
 TEST(RvvOpsTest, Int8FullyConnectedMatchesReferenceAcrossVectorBoundaries) {
   const FullyConnectedParams params = MakeInt8FullyConnectedParams();
   constexpr int kBatches = 3;
@@ -1001,7 +1204,7 @@ TEST(RvvOpsTest,
     for (int i = 0; i < size; ++i) {
       expected[i] =
           Clamp(kBroadcastValue + input[i], params.float_activation_min,
-                          params.float_activation_max);
+                params.float_activation_max);
     }
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
@@ -1034,6 +1237,103 @@ TEST(RvvOpsTest, BiasAndClampMatchesScalarReferenceAcrossVectorBoundaries) {
 
     EXPECT_THAT(actual, ElementsAreArray(expected))
         << "bias_size=" << bias_size;
+  }
+}
+
+TEST(RvvOpsTest,
+     FloatFullyConnectedGemmMatchesReferenceAcrossVectorBoundaries) {
+  FullyConnectedParams params;
+  params.float_activation_min = -3.75f;
+  params.float_activation_max = 4.5f;
+  constexpr int kBatches = 3;
+  constexpr int kOutputDepth = 7;
+  const RuntimeShape bias_shape({kOutputDepth});
+  std::vector<float> bias = MakeInput(kOutputDepth, 0.25f);
+  for (float& value : bias) {
+    value *= 0.125f;
+  }
+
+  for (int accum_depth : Float32M4VectorLengths()) {
+    if (accum_depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({kBatches, accum_depth});
+    const RuntimeShape filter_shape({kOutputDepth, accum_depth});
+    const RuntimeShape output_shape({kBatches, kOutputDepth});
+    std::vector<float> input = MakeInput(input_shape.FlatSize(), -0.375f);
+    std::vector<float> filter = MakeInput(filter_shape.FlatSize(), 0.625f);
+    for (float& value : input) {
+      value *= 0.125f;
+    }
+    for (float& value : filter) {
+      value *= 0.125f;
+    }
+    std::vector<float> actual(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    optimized_ops::FullyConnected(
+        params, input_shape, input.data(), filter_shape, filter.data(),
+        bias_shape, bias.data(), output_shape, actual.data(), nullptr);
+    reference_ops::FullyConnected(params, input_shape, input.data(),
+                                  filter_shape, filter.data(), bias_shape,
+                                  bias.data(), output_shape, expected.data());
+
+    SCOPED_TRACE(::testing::Message() << "accum_depth=" << accum_depth);
+    ExpectFloatNearOrSpecial(actual, expected, 1e-4f);
+  }
+}
+
+TEST(RvvOpsTest, FloatConv1x1GemmMatchesReferenceAcrossVectorBoundaries) {
+  ConvParams params;
+  params.padding_type = PaddingType::kNone;
+  params.padding_values.width = 0;
+  params.padding_values.height = 0;
+  params.stride_width = 1;
+  params.stride_height = 1;
+  params.dilation_width_factor = 1;
+  params.dilation_height_factor = 1;
+  params.float_activation_min = -2.5f;
+  params.float_activation_max = 3.25f;
+  constexpr int kBatches = 1;
+  constexpr int kInputHeight = 3;
+  constexpr int kInputWidth = 4;
+  constexpr int kOutputDepth = 6;
+  const RuntimeShape bias_shape({kOutputDepth});
+  std::vector<float> bias = MakeInput(kOutputDepth, -0.125f);
+  for (float& value : bias) {
+    value *= 0.125f;
+  }
+
+  for (int input_depth : Float32M4VectorLengths()) {
+    if (input_depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape(
+        {kBatches, kInputHeight, kInputWidth, input_depth});
+    const RuntimeShape filter_shape({kOutputDepth, 1, 1, input_depth});
+    const RuntimeShape output_shape(
+        {kBatches, kInputHeight, kInputWidth, kOutputDepth});
+    const RuntimeShape im2col_shape({0});
+    std::vector<float> input = MakeInput(input_shape.FlatSize(), 0.375f);
+    std::vector<float> filter = MakeInput(filter_shape.FlatSize(), -0.625f);
+    for (float& value : input) {
+      value *= 0.125f;
+    }
+    for (float& value : filter) {
+      value *= 0.125f;
+    }
+    std::vector<float> actual(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    optimized_ops::Conv(params, input_shape, input.data(), filter_shape,
+                        filter.data(), bias_shape, bias.data(), output_shape,
+                        actual.data(), im2col_shape, nullptr, nullptr);
+    reference_ops::Conv(params, input_shape, input.data(), filter_shape,
+                        filter.data(), bias_shape, bias.data(), output_shape,
+                        expected.data(), im2col_shape, nullptr);
+
+    SCOPED_TRACE(::testing::Message() << "input_depth=" << input_depth);
+    ExpectFloatNearOrSpecial(actual, expected, 1e-4f);
   }
 }
 
@@ -1385,7 +1685,7 @@ TEST(RvvOpsTest, FloatSubMatchesReferenceAcrossVectorBoundaries) {
 
     optimized_ops::SubWithActivation<float>(params, shape, input1.data(), shape,
                                             input2.data(), shape,
-        actual.data());
+                                            actual.data());
     reference_ops::SubWithActivation(params, shape, input1.data(), shape,
                                      input2.data(), shape, expected.data());
 
@@ -1675,7 +1975,7 @@ TEST(RvvOpsTest,
     for (int i = 0; i < size; ++i) {
       expected[i] =
           Clamp(kBroadcastValue * input[i], params.float_activation_min,
-                          params.float_activation_max);
+                params.float_activation_max);
     }
 
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
@@ -2137,7 +2437,7 @@ std::vector<int32_t> ReferenceRnnRowSums(const int8_t* matrix, int m_rows,
 
 TEST(
     RvvOpsTest,
-     RnnFloatMatrixBatchVectorMultiplyAccumulateMatchesReferenceAcrossVectorBoundaries) {
+    RnnFloatMatrixBatchVectorMultiplyAccumulateMatchesReferenceAcrossVectorBoundaries) {
   constexpr int kRows = 7;
   constexpr int kBatch = 3;
 
@@ -2159,7 +2459,7 @@ TEST(
 
 TEST(
     RvvOpsTest,
-     RnnHybridInt8MatrixBatchVectorMultiplyAccumulateMatchesReferenceAcrossVectorBoundaries) {
+    RnnHybridInt8MatrixBatchVectorMultiplyAccumulateMatchesReferenceAcrossVectorBoundaries) {
   constexpr int kRows = 6;
   constexpr int kBatch = 3;
   const std::vector<float> scaling_factors = {0.03125f, 0.046875f, 0.0625f};
@@ -2185,7 +2485,7 @@ TEST(
 
 TEST(
     RvvOpsTest,
-     RnnHybridInt8MatrixBatchVectorMultiplyAccumulateWithOffsetsMatchesReferenceAcrossVectorBoundaries) {
+    RnnHybridInt8MatrixBatchVectorMultiplyAccumulateWithOffsetsMatchesReferenceAcrossVectorBoundaries) {
   constexpr int kRows = 5;
   constexpr int kBatch = 3;
   const std::vector<float> scaling_factors = {0.03125f, 0.046875f, 0.0625f};
@@ -2655,7 +2955,7 @@ TEST(RvvOpsTest,
 
     optimized_ops::ResizeNearestNeighbor(params, input_shape, input.data(),
                                          output_size_shape, output_size_data,
-        output_shape, actual.data());
+                                         output_shape, actual.data());
     int out = 0;
     for (int b = 0; b < kBatch; ++b) {
       for (int y = 0; y < kOutputHeight; ++y) {
@@ -2786,7 +3086,7 @@ TEST(RvvOpsTest, GatherFloatMatchesScalarAcrossVectorBoundaries) {
     ASSERT_EQ(
         reference_ops::Gather(params, input_shape, input.data(), coords_shape,
                               coords.data(), output_shape, actual.data()),
-              kTfLiteOk);
+        kTfLiteOk);
     int out = 0;
     for (int outer = 0; outer < kOuter; ++outer) {
       for (int coord : coords) {
@@ -3048,7 +3348,7 @@ TEST(RvvOpsTest, LstmCwiseMulInt16ToInt8MatchesPortableAcrossVectorBoundaries) {
 
 TEST(
     RvvOpsTest,
-     LstmVectorBatchVectorCwiseProductAccumulateMatchesPortableAcrossVectorBoundaries) {
+    LstmVectorBatchVectorCwiseProductAccumulateMatchesPortableAcrossVectorBoundaries) {
   for (int size : Int16M2VectorLengths()) {
     constexpr int kBatch = 3;
     const std::vector<int16_t> vector = MakeInt16Input(size, 701);

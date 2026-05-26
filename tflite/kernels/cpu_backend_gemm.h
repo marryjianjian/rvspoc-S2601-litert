@@ -17,12 +17,14 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_CPU_BACKEND_GEMM_H_
 
 #include <cstdint>
+#include <type_traits>
 
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/kernels/cpu_backend_context.h"
 #include "tflite/kernels/cpu_backend_gemm_custom_gemv.h"
 #include "tflite/kernels/cpu_backend_gemm_params.h"
 #include "tflite/kernels/cpu_backend_gemm_ruy.h"
+#include "tflite/kernels/cpu_backend_gemm_rvv.h"
 
 #ifndef TFLITE_WITH_RUY
 #include "tflite/kernels/cpu_backend_gemm_eigen.h"
@@ -129,6 +131,34 @@ void Gemm(const MatrixParams<LhsScalar>& lhs_params, const LhsScalar* lhs_data,
     // TFLiteStatus so we can return an error here.
     TFLITE_DCHECK(false);
     return;
+  }
+  if constexpr (std::is_same<LhsScalar, float>::value &&
+                std::is_same<RhsScalar, float>::value &&
+                std::is_same<AccumScalar, float>::value &&
+                std::is_same<DstScalar, float>::value &&
+                quantization_flavor == QuantizationFlavor::kFloatingPoint) {
+    if (detail::RvvFloatGemm(lhs_params, lhs_data, rhs_params, rhs_data,
+                             dst_params, dst_data, params)) {
+      return;
+    }
+  }
+  if constexpr ((std::is_same<LhsScalar, std::int8_t>::value ||
+                 std::is_same<LhsScalar, std::uint8_t>::value) &&
+                (std::is_same<RhsScalar, std::int8_t>::value ||
+                 std::is_same<RhsScalar, std::uint8_t>::value) &&
+                std::is_same<AccumScalar, std::int32_t>::value &&
+                (std::is_same<DstScalar, std::int8_t>::value ||
+                 std::is_same<DstScalar, std::uint8_t>::value) &&
+                (quantization_flavor ==
+                     QuantizationFlavor::kIntegerWithUniformMultiplier ||
+                 quantization_flavor ==
+                     QuantizationFlavor::kIntegerWithPerRowMultiplier)) {
+    if (detail::RvvQuantizedGemm<LhsScalar, RhsScalar, DstScalar,
+                                 quantization_flavor>(
+            lhs_params, lhs_data, rhs_params, rhs_data, dst_params, dst_data,
+            params)) {
+      return;
+    }
   }
   // In some cases we want to unconditionally use ruy as the backend, overriding
   // the `tflite_with_ruy` setting and the platform default.
