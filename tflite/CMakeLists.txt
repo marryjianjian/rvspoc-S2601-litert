@@ -93,6 +93,8 @@ option(TFLITE_ENABLE_EXTERNAL_DELEGATE "Enable External Delegate backend" ON)
 
 option(TFLITE_KERNEL_TEST "Enable tflite kernel unit test" OFF)
 option(TFLITE_ENABLE_RVV_TESTS "Build targeted RVV correctness tests" OFF)
+option(TFLITE_RISCV_SCALAR_BASELINE
+       "Force portable scalar GEMM for RISC-V baseline benchmarking" OFF)
 
 if(${CMAKE_CROSSCOMPILING})
   set(TFLITE_HOST_TOOLS_DIR "" CACHE PATH "Host tools directory")
@@ -206,6 +208,10 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     # Note: -march=rv64gcv should be set via toolchain file or CMAKE_C_FLAGS/CMAKE_CXX_FLAGS
   else()
     message(STATUS "RVV 1.0 optimizations disabled, using scalar fallback")
+  endif()
+  if(TFLITE_RISCV_SCALAR_BASELINE)
+    message(STATUS "RISC-V scalar baseline enabled")
+    list(APPEND TFLITE_TARGET_PUBLIC_OPTIONS "-DTFLITE_RISCV_SCALAR_BASELINE")
   endif()
 endif()
 
@@ -842,7 +848,10 @@ if(TFLITE_ENABLE_RVV_TESTS)
   list(REMOVE_ITEM TFLITE_NO_RVV_TARGET_PUBLIC_OPTIONS "-DTFLITE_RISCV_RVV")
   list(APPEND TFLITE_NO_RVV_TARGET_PUBLIC_OPTIONS "-DTFLITE_DISABLE_RISCV_RVV")
   if(TFLITE_RISCV64)
-    list(APPEND TFLITE_NO_RVV_TARGET_PUBLIC_OPTIONS "-march=rv64gc")
+    list(APPEND TFLITE_NO_RVV_TARGET_PUBLIC_OPTIONS
+      "-DTFLITE_RISCV_SCALAR_BASELINE"
+      "-march=rv64gc"
+    )
   endif()
 
   add_library(tensorflow-lite-norvv STATIC

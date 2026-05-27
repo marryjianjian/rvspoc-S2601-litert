@@ -1247,6 +1247,18 @@ TfLiteStatus EvalHybrid(TfLiteContext* context, TfLiteNode* node,
       op_params.float_activation_min = output_activation_min;
       op_params.float_activation_max = output_activation_max;
       if (data->groups == 1) {
+#if defined(TFLITE_RISCV_SCALAR_BASELINE)
+        const int output_depth = GetTensorShape(output).Dims(3);
+        std::vector<float> per_channel_scale(output_depth, 1.0f);
+        std::vector<int32_t> input_offsets(batch_size, 0);
+        reference_ops::HybridConvPerChannel(
+            op_params, scaling_factors_ptr, GetTensorShape(input),
+            quantized_input_ptr_batch, GetTensorShape(filter), filter_data,
+            GetTensorShape(bias), GetTensorData<float>(bias),
+            GetTensorShape(output), GetTensorData<float>(output),
+            GetTensorShape(im2col), GetTensorData<int8_t>(im2col),
+            per_channel_scale.data(), input_offsets.data());
+#else
         optimized_ops::HybridConv(
             op_params, scaling_factors_ptr, GetTensorShape(input),
             quantized_input_ptr_batch, GetTensorShape(filter), filter_data,
@@ -1256,6 +1268,7 @@ TfLiteStatus EvalHybrid(TfLiteContext* context, TfLiteNode* node,
             GetTensorData<float>(output), GetTensorShape(im2col),
             GetTensorData<int8_t>(im2col),
             CpuBackendContext::GetFromContext(context));
+#endif
       } else {
         // This case is handled by (fallbacked to) per channel hybrid group conv
         // and shouldn't hit this branch.
@@ -1273,6 +1286,11 @@ TfLiteStatus EvalHybrid(TfLiteContext* context, TfLiteNode* node,
 
 template <KernelType kernel_type, TfLiteType input_type>
 TfLiteStatus EvalImpl(TfLiteContext* context, TfLiteNode* node) {
+#if defined(TFLITE_RISCV_SCALAR_BASELINE)
+  constexpr KernelType effective_kernel_type = kReference;
+#else
+  constexpr KernelType effective_kernel_type = kernel_type;
+#endif
   auto* params = reinterpret_cast<TfLiteConvParams*>(node->builtin_data);
   OpData* data = reinterpret_cast<OpData*>(node->user_data);
 
@@ -1307,7 +1325,7 @@ TfLiteStatus EvalImpl(TfLiteContext* context, TfLiteNode* node) {
             // TODO(b/162870360): Fallback to PerChannel implementation
             // before we have grouped hybrid convolution.
             data->groups != 1) {
-          TF_LITE_ENSURE_OK(context, EvalHybridPerChannel<kernel_type>(
+          TF_LITE_ENSURE_OK(context, EvalHybridPerChannel<effective_kernel_type>(
                                          context, node, params, data, input,
                                          filter, bias, im2col, output));
         } else {
@@ -1315,25 +1333,26 @@ TfLiteStatus EvalImpl(TfLiteContext* context, TfLiteNode* node) {
               &context->tensors[node->temporaries
                                     ->data[data->accum_scratch_index]];
           TF_LITE_ENSURE_OK(context,
-                            EvalHybrid<kernel_type>(context, node, params, data,
-                                                    input, filter, bias, im2col,
-                                                    accum_scratch, output));
+                            EvalHybrid<effective_kernel_type>(
+                                context, node, params, data, input, filter,
+                                bias, im2col, accum_scratch, output));
         }
       } else {
-        EvalFloat<kernel_type>(context, node, params, data, input, filter, bias,
-                               im2col, hwcn_weights, output);
+        EvalFloat<effective_kernel_type>(context, node, params, data, input,
+                                         filter, bias, im2col, hwcn_weights,
+                                         output);
       }
       break;
     case kTfLiteUInt8:
-      EvalQuantized<kernel_type>(context, node, params, data, input, filter,
-                                 bias, im2col, output);
+      EvalQuantized<effective_kernel_type>(context, node, params, data, input,
+                                           filter, bias, im2col, output);
       break;
     case kTfLiteInt8:
-      EvalQuantizedPerChannel<kernel_type>(context, node, params, data, input,
-                                           filter, bias, output, im2col);
+      EvalQuantizedPerChannel<effective_kernel_type>(
+          context, node, params, data, input, filter, bias, output, im2col);
       break;
     case kTfLiteInt16:
-      EvalQuantizedPerChannel16x8<kernel_type>(
+      EvalQuantizedPerChannel16x8<effective_kernel_type>(
           context, node, params, data, input, filter, bias, output, im2col);
       break;
     default:

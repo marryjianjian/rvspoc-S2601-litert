@@ -1982,6 +1982,11 @@ TfLiteStatus EvalFloat(TfLiteContext* context, TfLiteNode* node,
 
 template <KernelType kernel_type>
 TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
+#if defined(TFLITE_RISCV_SCALAR_BASELINE)
+  constexpr KernelType effective_kernel_type = kReference;
+#else
+  constexpr KernelType effective_kernel_type = kernel_type;
+#endif
   auto* params =
       reinterpret_cast<TfLiteFullyConnectedParams*>(node->builtin_data);
   OpData* data = reinterpret_cast<OpData*>(node->user_data);
@@ -2010,8 +2015,8 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
 
   switch (filter->type) {
     case kTfLiteFloat32:
-      return EvalFloat<kernel_type>(context, node, params, data, input, filter,
-                                    bias, output);
+      return EvalFloat<effective_kernel_type>(context, node, params, data,
+                                              input, filter, bias, output);
     case kTfLiteUInt8:
       if (params->weights_format ==
           kTfLiteFullyConnectedWeightsFormatShuffled4x16Int8) {
@@ -2019,13 +2024,13 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
         TF_LITE_ENSURE_OK(
             context, GetOutputSafe(context, node, kShuffledInputWorkspaceTensor,
                                    &shuffled_input_workspace));
-        return EvalShuffledQuantized<kernel_type>(context, node, params, data,
-                                                  input, filter, bias, output,
-                                                  shuffled_input_workspace);
+        return EvalShuffledQuantized<effective_kernel_type>(
+            context, node, params, data, input, filter, bias, output,
+            shuffled_input_workspace);
       } else if (params->weights_format ==
                  kTfLiteFullyConnectedWeightsFormatDefault) {
-        return EvalQuantized<kernel_type>(context, node, params, data, input,
-                                          filter, bias, output);
+        return EvalQuantized<effective_kernel_type>(
+            context, node, params, data, input, filter, bias, output);
       } else {
         TF_LITE_KERNEL_LOG(context, "Unhandled fully-connected weights format");
         return kTfLiteError;
@@ -2035,8 +2040,8 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
     case kTfLiteInt2:
     case kTfLiteInt16:
       if (params->weights_format == kTfLiteFullyConnectedWeightsFormatDefault) {
-        return EvalQuantized<kernel_type>(context, node, params, data, input,
-                                          filter, bias, output);
+        return EvalQuantized<effective_kernel_type>(
+            context, node, params, data, input, filter, bias, output);
       } else {
         TF_LITE_KERNEL_LOG(context, "Unhandled fully-connected weights format");
         return kTfLiteError;

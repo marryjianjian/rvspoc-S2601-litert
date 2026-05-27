@@ -25,6 +25,7 @@ limitations under the License.
 #include "tflite/kernels/cpu_backend_gemm_params.h"
 #include "tflite/kernels/cpu_backend_gemm_ruy.h"
 #include "tflite/kernels/cpu_backend_gemm_rvv.h"
+#include "tflite/kernels/cpu_backend_gemm_scalar.h"
 
 #ifndef TFLITE_WITH_RUY
 #include "tflite/kernels/cpu_backend_gemm_eigen.h"
@@ -132,6 +133,12 @@ void Gemm(const MatrixParams<LhsScalar>& lhs_params, const LhsScalar* lhs_data,
     TFLITE_DCHECK(false);
     return;
   }
+#if defined(TFLITE_RISCV_SCALAR_BASELINE)
+  if (detail::ScalarGemm(lhs_params, lhs_data, rhs_params, rhs_data,
+                         dst_params, dst_data, params)) {
+    return;
+  }
+#endif
   if constexpr (std::is_same<LhsScalar, float>::value &&
                 std::is_same<RhsScalar, float>::value &&
                 std::is_same<AccumScalar, float>::value &&
@@ -218,6 +225,13 @@ void Gemm(const MatrixParams<int8_t>& lhs_params, const int8_t* lhs_data,
     return;
   }
 
+#if defined(TFLITE_RISCV_SCALAR_BASELINE)
+  if (detail::ScalarGemm(lhs_params, lhs_data, rhs_params, rhs_data,
+                         dst_params, dst_data, params)) {
+    return;
+  }
+#endif
+
   // Currently, only Ruy backend supports 16x8 quant gemm so we use ruy
   // only.
   detail::GemmImplUsingRuy<int8_t, int16_t, int32_t, int16_t,
@@ -238,6 +252,13 @@ void Gemm(const MatrixParams<LhsScalar>& lhs_params, const LhsScalar* lhs_data,
           CpuBackendContext* context) {
   ruy::profiler::ScopeLabel label("cpu_backend_gemm::Gemm");
   ValidateParams(lhs_params, rhs_params, dst_params, params);
+
+#if defined(TFLITE_RISCV_SCALAR_BASELINE)
+  if (detail::ScalarGemm(lhs_params, lhs_data, rhs_params, rhs_data,
+                         dst_params, dst_data, params)) {
+    return;
+  }
+#endif
 
   // Currently, only Ruy backend supports get raw accumulator, so we use ruy
   // only.

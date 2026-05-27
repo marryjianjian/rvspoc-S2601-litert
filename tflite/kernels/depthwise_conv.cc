@@ -577,6 +577,11 @@ TfLiteStatus EvalHybridPerChannel(TfLiteContext* context, TfLiteNode* node,
 
 template <KernelType kernel_type, TfLiteType input_type>
 TfLiteStatus EvalImpl(TfLiteContext* context, TfLiteNode* node) {
+#if defined(TFLITE_RISCV_SCALAR_BASELINE)
+  constexpr KernelType effective_kernel_type = kReference;
+#else
+  constexpr KernelType effective_kernel_type = kernel_type;
+#endif
   auto* params =
       reinterpret_cast<TfLiteDepthwiseConvParams*>(node->builtin_data);
   OpData* data = reinterpret_cast<OpData*>(node->user_data);
@@ -596,11 +601,11 @@ TfLiteStatus EvalImpl(TfLiteContext* context, TfLiteNode* node) {
   switch (input_type) {  // Already know in/out types are same.
     case kTfLiteFloat32:
       if (filter->type == kTfLiteFloat32) {
-        return EvalFloat<kernel_type>(context, node, params, data, input,
-                                      filter, bias, output);
+        return EvalFloat<effective_kernel_type>(context, node, params, data,
+                                                input, filter, bias, output);
       } else if (filter->type == kTfLiteInt8) {
-        return EvalHybridPerChannel<kernel_type>(context, node, params, data,
-                                                 input, filter, bias, output);
+        return EvalHybridPerChannel<effective_kernel_type>(
+            context, node, params, data, input, filter, bias, output);
       } else {
         TF_LITE_KERNEL_LOG(
             context, "Type %s with filter type %s not currently supported.",
@@ -609,12 +614,12 @@ TfLiteStatus EvalImpl(TfLiteContext* context, TfLiteNode* node) {
       }
       break;
     case kTfLiteUInt8:
-      return EvalQuantized<kernel_type>(context, node, params, data, input,
-                                        filter, bias, output);
+      return EvalQuantized<effective_kernel_type>(context, node, params, data,
+                                                  input, filter, bias, output);
       break;
     case kTfLiteInt8:
-      return EvalQuantizedPerChannel<kernel_type>(context, node, params, data,
-                                                  input, filter, bias, output);
+      return EvalQuantizedPerChannel<effective_kernel_type>(
+          context, node, params, data, input, filter, bias, output);
       break;
     case kTfLiteInt16:
       return EvalQuantizedPerChannel16x8(params, data, input, filter, bias,
