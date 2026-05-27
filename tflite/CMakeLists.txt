@@ -776,6 +776,7 @@ else()
   list(FILTER _ALL_TFLITE_SRCS EXCLUDE REGEX ".*mmap_allocation\\.cc$")
 endif()
 list(FILTER _ALL_TFLITE_SRCS EXCLUDE REGEX ".*/rvv_model_benchmark\\.cc$")
+list(FILTER _ALL_TFLITE_SRCS EXCLUDE REGEX ".*/rvv_model_precision_test\\.cc$")
 
 add_library(tensorflow-lite
   ${_ALL_TFLITE_SRCS}
@@ -905,6 +906,20 @@ if(TFLITE_ENABLE_RVV_TESTS)
     ${TFLITE_SOURCE_DIR}/kernels/internal/optimized/rvv_model_benchmark.cc
   )
   target_link_libraries(tensorflow-lite-rvv-model-benchmark-norvv
+    tensorflow-lite-norvv
+  )
+
+  add_executable(tensorflow-lite-rvv-model-precision-test
+    ${TFLITE_SOURCE_DIR}/kernels/internal/optimized/rvv_model_precision_test.cc
+  )
+  target_link_libraries(tensorflow-lite-rvv-model-precision-test
+    tensorflow-lite
+  )
+
+  add_executable(tensorflow-lite-rvv-model-precision-test-norvv
+    ${TFLITE_SOURCE_DIR}/kernels/internal/optimized/rvv_model_precision_test.cc
+  )
+  target_link_libraries(tensorflow-lite-rvv-model-precision-test-norvv
     tensorflow-lite-norvv
   )
 endif()
