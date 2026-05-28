@@ -21,6 +21,7 @@ limitations under the License.
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/kernels/internal/optimized/cpu_check.h"
 #include "tflite/kernels/internal/optimized/depthwiseconv_uint8_3x3_filter.h"
+#include "tflite/kernels/internal/optimized/rvv_ops.h"
 #include "tflite/kernels/internal/reference/depthwiseconv_uint8.h"
 #include "tflite/kernels/internal/types.h"
 
@@ -1624,6 +1625,59 @@ inline void QuantizedDepthwiseConvAccumRowGeneric(
   }
 }
 
+#if defined(USE_RVV)
+inline void QuantizedDepthwiseConvAccumRowRvvDepthMultiplier1(
+    int stride, int dilation_factor, int input_depth, int input_width,
+    const uint8_t* input_data, int16_t input_offset, int pad_width,
+    int depth_multiplier, int filter_width, const uint8_t* filter_data,
+    int16_t filter_offset, int out_x_buffer_start, int out_x_buffer_end,
+    int output_depth, int32_t* acc_buffer) {
+  TFLITE_DCHECK_EQ(depth_multiplier, 1);
+  TFLITE_DCHECK_EQ(output_depth, input_depth);
+  const uint8_t* filter_base_ptr = filter_data;
+  for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+    const int out_x_loop_start = std::max(
+        out_x_buffer_start,
+        (pad_width - dilation_factor * filter_x + stride - 1) / stride);
+    const int out_x_loop_end = std::min(
+        out_x_buffer_end,
+        (pad_width + input_width - dilation_factor * filter_x + stride - 1) /
+            stride);
+
+    int32_t* acc_buffer_ptr =
+        acc_buffer + (out_x_loop_start - out_x_buffer_start) * output_depth;
+    const int in_x_origin =
+        (out_x_loop_start * stride) - pad_width + dilation_factor * filter_x;
+    const uint8_t* input_ptr = input_data + in_x_origin * input_depth;
+    const int input_ptr_increment = stride * input_depth;
+    for (int out_x = out_x_loop_start; out_x < out_x_loop_end; ++out_x) {
+      for (int channel = 0; channel < input_depth;) {
+        const size_t vl = __riscv_vsetvl_e8m1(input_depth - channel);
+        const vuint8m1_t input_u8 =
+            __riscv_vle8_v_u8m1(input_ptr + channel, vl);
+        const vuint8m1_t filter_u8 =
+            __riscv_vle8_v_u8m1(filter_base_ptr + channel, vl);
+        vint32m4_t input = __riscv_vreinterpret_v_u32m4_i32m4(
+            __riscv_vzext_vf2_u32m4(__riscv_vzext_vf2_u16m2(input_u8, vl), vl));
+        vint32m4_t filter =
+            __riscv_vreinterpret_v_u32m4_i32m4(__riscv_vzext_vf2_u32m4(
+                __riscv_vzext_vf2_u16m2(filter_u8, vl), vl));
+        input = __riscv_vadd_vx_i32m4(input, input_offset, vl);
+        filter = __riscv_vadd_vx_i32m4(filter, filter_offset, vl);
+        const vint32m4_t product = __riscv_vmul_vv_i32m4(input, filter, vl);
+        vint32m4_t acc = __riscv_vle32_v_i32m4(acc_buffer_ptr + channel, vl);
+        acc = __riscv_vadd_vv_i32m4(acc, product, vl);
+        __riscv_vse32_v_i32m4(acc_buffer_ptr + channel, acc, vl);
+        channel += vl;
+      }
+      input_ptr += input_ptr_increment;
+      acc_buffer_ptr += output_depth;
+    }
+    filter_base_ptr += output_depth;
+  }
+}
+#endif  // USE_RVV
+
 // Initializes the accumulator buffer with bias values.
 inline void DepthwiseConvInitAccBuffer(int num_output_pixels, int output_depth,
                                        const int32_t* bias_data,
@@ -1806,6 +1860,12 @@ inline void DepthwiseConvGeneral(
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
 #endif  // USE_NEON
+
+#ifdef USE_RVV
+  if (!row_accum_func && depth_multiplier == 1) {
+    row_accum_func = QuantizedDepthwiseConvAccumRowRvvDepthMultiplier1;
+  }
+#endif  // USE_RVV
 
   // No matching fast kernel found, use slow fallback.
   if (!row_accum_func) {
@@ -2009,6 +2069,23 @@ inline void DepthwiseConvGeneral(
           vst1_lane_u8(output_ptr + 2, res_u8, 2);
           vst1_lane_u8(output_ptr + 3, res_u8, 3);
           output_ptr += 4;
+        }
+#elif defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+        for (; i < num_output_values;) {
+          const size_t vl = __riscv_vsetvl_e8m1(num_output_values - i);
+          vint32m4_t acc = __riscv_vle32_v_i32m4(acc_buffer + i, vl);
+          acc = rvv_ops::MultiplyByQuantizedMultiplier(acc, output_multiplier,
+                                                       output_shift, vl);
+          acc = __riscv_vadd_vx_i32m4(acc, output_offset, vl);
+          acc = __riscv_vmax_vx_i32m4(acc, output_activation_min, vl);
+          acc = __riscv_vmin_vx_i32m4(acc, output_activation_max, vl);
+          const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(acc, 0, vl);
+          const vint8m1_t narrowed_i8 =
+              __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+          __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_ptr),
+                              narrowed_i8, vl);
+          output_ptr += vl;
+          i += vl;
         }
 #endif  // USE_NEON
 

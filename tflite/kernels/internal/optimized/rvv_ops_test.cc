@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "tflite/kernels/cpu_backend_gemm.h"
 #include "tflite/kernels/internal/common.h"
+#include "tflite/kernels/internal/optimized/depthwiseconv_multithread.h"
 #include "tflite/kernels/internal/optimized/integer_ops/add.h"
 #include "tflite/kernels/internal/optimized/integer_ops/conv.h"
 #include "tflite/kernels/internal/optimized/integer_ops/depthwise_conv.h"
@@ -38,6 +39,8 @@ limitations under the License.
 #include "tflite/kernels/internal/portable_tensor_utils.h"
 #include "tflite/kernels/internal/reference/add.h"
 #include "tflite/kernels/internal/reference/conv.h"
+#include "tflite/kernels/internal/reference/depthwiseconv_float.h"
+#include "tflite/kernels/internal/reference/depthwiseconv_uint8.h"
 #include "tflite/kernels/internal/reference/div.h"
 #include "tflite/kernels/internal/reference/fully_connected.h"
 #include "tflite/kernels/internal/reference/gelu.h"
@@ -78,8 +81,6 @@ namespace {
 #ifdef USE_RVV
 
 using ::testing::ElementsAreArray;
-using ::testing::FloatNear;
-using ::testing::Pointwise;
 
 struct OneDimTfLiteIntArray {
   int size;
@@ -156,9 +157,19 @@ void MakeStablehloSpecialFloatInputs(int size, std::vector<float>* input1,
   }
 }
 
-void ExpectFloatNearOrSpecial(const std::vector<float>& actual,
-                              const std::vector<float>& expected,
-                              float tolerance = 1e-6f) {
+double StrictRelativeError(float actual, float expected) {
+  const double abs_diff =
+      std::abs(static_cast<double>(actual) - static_cast<double>(expected));
+  const double ref_abs = std::abs(static_cast<double>(expected));
+  if (ref_abs == 0.0) {
+    return abs_diff == 0.0 ? 0.0 : std::numeric_limits<double>::infinity();
+  }
+  return abs_diff / ref_abs;
+}
+
+void ExpectFloatRelativeNearOrSpecial(const std::vector<float>& actual,
+                                      const std::vector<float>& expected,
+                                      float relative_tolerance = 1e-5f) {
   ASSERT_EQ(actual.size(), expected.size());
   for (int i = 0; i < expected.size(); ++i) {
     if (std::isnan(expected[i])) {
@@ -166,7 +177,10 @@ void ExpectFloatNearOrSpecial(const std::vector<float>& actual,
     } else if (std::isinf(expected[i])) {
       EXPECT_EQ(actual[i], expected[i]) << "i=" << i;
     } else {
-      EXPECT_THAT(actual[i], FloatNear(expected[i], tolerance)) << "i=" << i;
+      const double rel_error = StrictRelativeError(actual[i], expected[i]);
+      EXPECT_LE(rel_error, static_cast<double>(relative_tolerance))
+          << "i=" << i << " actual=" << actual[i]
+          << " expected=" << expected[i];
     }
   }
 }
@@ -485,6 +499,39 @@ ConvParams MakeInt8ConvPerChannelParams() {
   return params;
 }
 
+DepthwiseParams MakeFloatDepthwiseConvParams() {
+  DepthwiseParams params;
+  params.padding_values.height = 1;
+  params.padding_values.width = 1;
+  params.stride_height = 1;
+  params.stride_width = 2;
+  params.dilation_height_factor = 1;
+  params.dilation_width_factor = 1;
+  params.depth_multiplier = 1;
+  params.float_activation_min = 0.125f;
+  params.float_activation_max = 1.75f;
+  return params;
+}
+
+DepthwiseParams MakeUint8DepthwiseConvParams() {
+  DepthwiseParams params;
+  params.padding_values.height = 1;
+  params.padding_values.width = 1;
+  params.stride_height = 1;
+  params.stride_width = 2;
+  params.dilation_height_factor = 1;
+  params.dilation_width_factor = 1;
+  params.depth_multiplier = 1;
+  params.input_offset = -128;
+  params.weights_offset = -117;
+  params.output_offset = 129;
+  params.output_multiplier = 1073741824;
+  params.output_shift = -3;
+  params.quantized_activation_min = 7;
+  params.quantized_activation_max = 243;
+  return params;
+}
+
 DepthwiseParams MakeInt8DepthwiseConvPerChannelParams() {
   DepthwiseParams params;
   params.padding_values.height = 1;
@@ -704,8 +751,8 @@ TEST(RvvOpsTest, DequantizeInt8MatchesReferenceAcrossVectorBoundaries) {
           static_cast<float>(params.scale * (input[i] - params.zero_point));
     }
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "size=" << size;
+    SCOPED_TRACE(::testing::Message() << "size=" << size);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
 }
 
@@ -727,8 +774,8 @@ TEST(RvvOpsTest, DequantizeUint8MatchesReferenceAcrossVectorBoundaries) {
           static_cast<float>(params.scale * (input[i] - params.zero_point));
     }
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "size=" << size;
+    SCOPED_TRACE(::testing::Message() << "size=" << size);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
 }
 
@@ -750,8 +797,8 @@ TEST(RvvOpsTest, DequantizeInt16MatchesReferenceAcrossVectorBoundaries) {
           static_cast<float>(params.scale * (input[i] - params.zero_point));
     }
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "size=" << size;
+    SCOPED_TRACE(::testing::Message() << "size=" << size);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
 }
 
@@ -1113,6 +1160,95 @@ TEST(RvvOpsTest, Int8ConvPerChannelMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, FloatDepthwiseConvMatchesReferenceAcrossVectorBoundaries) {
+  const DepthwiseParams params = MakeFloatDepthwiseConvParams();
+  constexpr int kBatches = 1;
+  constexpr int kInputHeight = 4;
+  constexpr int kInputWidth = 5;
+  constexpr int kFilterHeight = 2;
+  constexpr int kFilterWidth = 3;
+  constexpr int kOutputHeight = 5;
+  constexpr int kOutputWidth = 3;
+  CpuBackendContext cpu_backend_context;
+  cpu_backend_context.SetMaxNumThreads(1);
+
+  for (int input_depth : Float32M4VectorLengths()) {
+    if (input_depth == 0) {
+      continue;
+    }
+    const int output_depth = input_depth * params.depth_multiplier;
+    const RuntimeShape input_shape(
+        {kBatches, kInputHeight, kInputWidth, input_depth});
+    const RuntimeShape filter_shape(
+        {1, kFilterHeight, kFilterWidth, output_depth});
+    const RuntimeShape bias_shape({output_depth});
+    const RuntimeShape output_shape(
+        {kBatches, kOutputHeight, kOutputWidth, output_depth});
+    const std::vector<float> input = MakeInput(input_shape.FlatSize(), 0.25f);
+    const std::vector<float> filter =
+        MakeInput(filter_shape.FlatSize(), -0.35f);
+    const std::vector<float> bias = MakeInput(output_depth, 0.1f);
+    std::vector<float> actual(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    optimized_ops::DepthwiseConv(params, input_shape, input.data(),
+                                 filter_shape, filter.data(), bias_shape,
+                                 bias.data(), output_shape, actual.data(),
+                                 &cpu_backend_context);
+    reference_ops::DepthwiseConv(params, input_shape, input.data(),
+                                 filter_shape, filter.data(), bias_shape,
+                                 bias.data(), output_shape, expected.data());
+
+    SCOPED_TRACE(::testing::Message() << "input_depth=" << input_depth);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
+  }
+}
+
+TEST(RvvOpsTest, Uint8DepthwiseConvMatchesReferenceAcrossVectorBoundaries) {
+  const DepthwiseParams params = MakeUint8DepthwiseConvParams();
+  constexpr int kBatches = 1;
+  constexpr int kInputHeight = 4;
+  constexpr int kInputWidth = 5;
+  constexpr int kFilterHeight = 2;
+  constexpr int kFilterWidth = 3;
+  constexpr int kOutputHeight = 5;
+  constexpr int kOutputWidth = 3;
+  CpuBackendContext cpu_backend_context;
+  cpu_backend_context.SetMaxNumThreads(1);
+
+  for (int input_depth : Int8M1VectorLengths()) {
+    if (input_depth == 0) {
+      continue;
+    }
+    const int output_depth = input_depth * params.depth_multiplier;
+    const RuntimeShape input_shape(
+        {kBatches, kInputHeight, kInputWidth, input_depth});
+    const RuntimeShape filter_shape(
+        {1, kFilterHeight, kFilterWidth, output_depth});
+    const RuntimeShape bias_shape({output_depth});
+    const RuntimeShape output_shape(
+        {kBatches, kOutputHeight, kOutputWidth, output_depth});
+    const std::vector<uint8_t> input =
+        MakeUint8Input(input_shape.FlatSize(), 53);
+    const std::vector<uint8_t> filter =
+        MakeUint8Input(filter_shape.FlatSize(), 197);
+    const std::vector<int32_t> bias = MakeInt32Input(output_depth, 307);
+    std::vector<uint8_t> actual(output_shape.FlatSize());
+    std::vector<uint8_t> expected(output_shape.FlatSize());
+
+    optimized_ops::DepthwiseConv(params, input_shape, input.data(),
+                                 filter_shape, filter.data(), bias_shape,
+                                 bias.data(), output_shape, actual.data(),
+                                 &cpu_backend_context);
+    reference_ops::DepthwiseConv(params, input_shape, input.data(),
+                                 filter_shape, filter.data(), bias_shape,
+                                 bias.data(), output_shape, expected.data());
+
+    EXPECT_THAT(actual, ElementsAreArray(expected))
+        << "input_depth=" << input_depth;
+  }
+}
+
 TEST(RvvOpsTest,
      Int8DepthwiseConvPerChannelMatchesReferenceAcrossVectorBoundaries) {
   const DepthwiseParams params = MakeInt8DepthwiseConvPerChannelParams();
@@ -1279,7 +1415,7 @@ TEST(RvvOpsTest,
                                   bias.data(), output_shape, expected.data());
 
     SCOPED_TRACE(::testing::Message() << "accum_depth=" << accum_depth);
-    ExpectFloatNearOrSpecial(actual, expected, 1e-4f);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -1333,7 +1469,7 @@ TEST(RvvOpsTest, FloatConv1x1GemmMatchesReferenceAcrossVectorBoundaries) {
                         expected.data(), im2col_shape, nullptr);
 
     SCOPED_TRACE(::testing::Message() << "input_depth=" << input_depth);
-    ExpectFloatNearOrSpecial(actual, expected, 1e-4f);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -1422,8 +1558,8 @@ TEST(RvvOpsTest, FloatAveragePoolMatchesReferenceAcrossVectorBoundaries) {
     EXPECT_TRUE(reference_ops::AveragePool(params, input_shape, input.data(),
                                            output_shape, expected.data()));
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "depth=" << depth;
+    SCOPED_TRACE(::testing::Message() << "depth=" << depth);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
 }
 
@@ -1493,8 +1629,8 @@ TEST(RvvOpsTest, FloatL2PoolMatchesReferenceAcrossVectorBoundaries) {
     reference_ops::L2Pool(params, input_shape, input.data(), output_shape,
                           expected.data());
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-5f), expected))
-        << "depth=" << depth;
+    SCOPED_TRACE(::testing::Message() << "depth=" << depth);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -1586,8 +1722,8 @@ TEST(RvvOpsTest, FloatReduceSumLastAxisMatchesReferenceAcrossVectorBoundaries) {
       }
     }
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-5f), expected))
-        << "axis_size=" << axis_size;
+    SCOPED_TRACE(::testing::Message() << "axis_size=" << axis_size);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -1618,8 +1754,8 @@ TEST(RvvOpsTest, FloatMeanLastAxisMatchesReferenceAcrossVectorBoundaries) {
       expected[outer] /= static_cast<float>(axis_size);
     }
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "axis_size=" << axis_size;
+    SCOPED_TRACE(::testing::Message() << "axis_size=" << axis_size);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
 }
 
@@ -1776,8 +1912,8 @@ TEST(RvvOpsTest, FloatHardSwishMatchesReferenceAcrossVectorBoundaries) {
     optimized_ops::HardSwish(shape, input.data(), shape, actual.data());
     reference_ops::HardSwish(shape, input.data(), shape, expected.data());
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "size=" << size;
+    SCOPED_TRACE(::testing::Message() << "size=" << size);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
 }
 
@@ -1796,7 +1932,7 @@ TEST(RvvOpsTest, FloatLogisticMatchesScalarAcrossVectorBoundaries) {
     }
 
     SCOPED_TRACE(size);
-    ExpectFloatNearOrSpecial(actual, expected);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -1815,7 +1951,7 @@ TEST(RvvOpsTest, FloatTanhMatchesScalarAcrossVectorBoundaries) {
     }
 
     SCOPED_TRACE(size);
-    ExpectFloatNearOrSpecial(actual, expected);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -1832,7 +1968,7 @@ TEST(RvvOpsTest, FloatEluMatchesScalarAcrossVectorBoundaries) {
     }
 
     SCOPED_TRACE(size);
-    ExpectFloatNearOrSpecial(actual, expected);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -1850,7 +1986,7 @@ TEST(RvvOpsTest, FloatGeluMatchesScalarAcrossVectorBoundaries) {
     }
 
     SCOPED_TRACE(size);
-    ExpectFloatNearOrSpecial(actual, expected, 1e-5f);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-5f);
   }
 }
 
@@ -1868,7 +2004,7 @@ TEST(RvvOpsTest, FloatGeluApproximateMatchesScalarAcrossVectorBoundaries) {
     }
 
     SCOPED_TRACE(size);
-    ExpectFloatNearOrSpecial(actual, expected, 1e-5f);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-5f);
   }
 }
 
@@ -1885,7 +2021,7 @@ TEST(RvvOpsTest, FloatSwishMatchesScalarAcrossVectorBoundaries) {
     }
 
     SCOPED_TRACE(size);
-    ExpectFloatNearOrSpecial(actual, expected);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -1906,8 +2042,8 @@ TEST(RvvOpsTest, FloatSoftmaxMatchesReferenceAcrossVectorBoundaries) {
     optimized_ops::Softmax(params, shape, input.data(), shape, actual.data());
     reference_ops::Softmax(params, shape, input.data(), shape, expected.data());
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "depth=" << depth;
+    SCOPED_TRACE(::testing::Message() << "depth=" << depth);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
 }
 
@@ -2452,8 +2588,8 @@ TEST(
     ReferenceRnnMatrixBatchVectorMultiplyAccumulateFloat(
         matrix.data(), kRows, cols, vector.data(), kBatch, expected.data());
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-4f), expected))
-        << "cols=" << cols;
+    SCOPED_TRACE(::testing::Message() << "cols=" << cols);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -2478,8 +2614,8 @@ TEST(
         kBatch, /*per_channel_scale=*/nullptr, /*input_offset=*/nullptr,
         /*row_sums=*/nullptr, expected.data());
 
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "cols=" << cols;
+    SCOPED_TRACE(::testing::Message() << "cols=" << cols);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
 }
 
@@ -2515,8 +2651,8 @@ TEST(
 
     EXPECT_THAT(actual_row_sums, ElementsAreArray(expected_row_sums))
         << "cols=" << cols;
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "cols=" << cols;
+    SCOPED_TRACE(::testing::Message() << "cols=" << cols);
+    ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
     EXPECT_FALSE(compute_row_sums) << "cols=" << cols;
   }
 }
@@ -2531,29 +2667,37 @@ TEST(RvvOpsTest, RnnFloatActivationsMatchReferenceAcrossVectorBoundaries) {
     for (int i = 0; i < size; ++i) {
       expected[i] = std::max(0.0f, input[i]);
     }
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "Relu size=" << size;
+    {
+      SCOPED_TRACE(::testing::Message() << "Relu size=" << size);
+      ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
+    }
 
     tensor_utils::ApplyRelu1ToVector(input.data(), size, actual.data());
     for (int i = 0; i < size; ++i) {
       expected[i] = std::max(-1.0f, std::min(input[i], 1.0f));
     }
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "Relu1 size=" << size;
+    {
+      SCOPED_TRACE(::testing::Message() << "Relu1 size=" << size);
+      ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
+    }
 
     tensor_utils::ApplyRelu6ToVector(input.data(), size, actual.data());
     for (int i = 0; i < size; ++i) {
       expected[i] = std::max(0.0f, std::min(input[i], 6.0f));
     }
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "Relu6 size=" << size;
+    {
+      SCOPED_TRACE(::testing::Message() << "Relu6 size=" << size);
+      ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
+    }
 
     tensor_utils::ApplySignbitToVector(input.data(), size, actual.data());
     for (int i = 0; i < size; ++i) {
       expected[i] = std::signbit(input[i]);
     }
-    EXPECT_THAT(actual, Pointwise(FloatNear(1e-6f), expected))
-        << "Signbit size=" << size;
+    {
+      SCOPED_TRACE(::testing::Message() << "Signbit size=" << size);
+      ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
+    }
 
     if (size >= 2) {
       std::vector<float> zero_input(size, 0.0f);
@@ -2754,10 +2898,9 @@ TEST(RvvOpsTest, SvdfFloatMatchesReferenceAcrossVectorBoundaries) {
                        expected_scratch.data(), expected_state.data(),
                        expected_output.data());
 
-    EXPECT_THAT(actual_state, Pointwise(FloatNear(1e-4f), expected_state))
-        << "size=" << size;
-    EXPECT_THAT(actual_output, Pointwise(FloatNear(1e-4f), expected_output))
-        << "size=" << size;
+    SCOPED_TRACE(::testing::Message() << "size=" << size);
+    ExpectFloatRelativeNearOrSpecial(actual_state, expected_state);
+    ExpectFloatRelativeNearOrSpecial(actual_output, expected_output);
   }
 }
 
@@ -2877,8 +3020,8 @@ TEST(RvvOpsTest, LstmCwiseClippingMatchesPortableAcrossVectorBoundaries) {
     for (float& value : expected_float) {
       value = std::max(std::min(2.5f, value), -2.5f);
     }
-    EXPECT_THAT(actual_float, Pointwise(FloatNear(1e-6f), expected_float))
-        << "float size=" << size;
+    SCOPED_TRACE(::testing::Message() << "float size=" << size);
+    ExpectFloatRelativeNearOrSpecial(actual_float, expected_float, 1e-6f);
 
     std::vector<int16_t> actual_i16 = MakeInt16Input(size, 3109);
     std::vector<int16_t> expected_i16 = actual_i16;
@@ -2913,8 +3056,8 @@ TEST(RvvOpsTest, LstmSub1VectorMatchesPortableAcrossVectorBoundaries) {
     for (int i = 0; i < size; ++i) {
       expected_float[i] = 1.0f - input_float[i];
     }
-    EXPECT_THAT(actual_float, Pointwise(FloatNear(1e-6f), expected_float))
-        << "float size=" << size;
+    SCOPED_TRACE(::testing::Message() << "float size=" << size);
+    ExpectFloatRelativeNearOrSpecial(actual_float, expected_float, 1e-6f);
 
     const std::vector<int16_t> input_i16 = MakeInt16Input(size, 1777);
     std::vector<int16_t> actual_i16(size);
@@ -3016,7 +3159,7 @@ TEST(RvvOpsTest, ConcatenationFloatMatchesScalarAcrossVectorBoundaries) {
       }
     }
 
-    ExpectFloatNearOrSpecial(actual, expected);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -3097,7 +3240,7 @@ TEST(RvvOpsTest, GatherFloatMatchesScalarAcrossVectorBoundaries) {
       }
     }
 
-    ExpectFloatNearOrSpecial(actual, expected);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -3141,25 +3284,25 @@ TEST(RvvOpsTest, StablehloFloatElementwiseMatchesScalarAcrossVectorBoundaries) {
                 ops::builtin::ComputationType::kAdd>(
         input1.data(), input2.data(), actual.data(), size));
     for (int i = 0; i < size; ++i) expected[i] = input1[i] + input2[i];
-    ExpectFloatNearOrSpecial(actual, expected);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
 
     ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
                 ops::builtin::ComputationType::kMul>(
         input1.data(), input2.data(), actual.data(), size));
     for (int i = 0; i < size; ++i) expected[i] = input1[i] * input2[i];
-    ExpectFloatNearOrSpecial(actual, expected);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
 
     ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
                 ops::builtin::ComputationType::kMax>(
         input1.data(), input2.data(), actual.data(), size));
     for (int i = 0; i < size; ++i) expected[i] = std::max(input1[i], input2[i]);
-    ExpectFloatNearOrSpecial(actual, expected);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
 
     ASSERT_TRUE(ops::builtin::RvvStablehloElementwiseFlat<
                 ops::builtin::ComputationType::kMin>(
         input1.data(), input2.data(), actual.data(), size));
     for (int i = 0; i < size; ++i) expected[i] = std::min(input1[i], input2[i]);
-    ExpectFloatNearOrSpecial(actual, expected);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
   }
 }
 
@@ -3211,7 +3354,7 @@ TEST(RvvOpsTest, StablehloFloatKernelEntryMatchesScalarAcrossVectorBoundaries) {
             TFL_UNREACHABLE();
         }
       }
-      ExpectFloatNearOrSpecial(model.GetOutput<float>(), expected);
+      ExpectFloatRelativeNearOrSpecial(model.GetOutput<float>(), expected);
     }
   }
 }

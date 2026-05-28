@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/kernels/internal/optimized/cpu_check.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/types.h"
 
 namespace tflite {
@@ -877,6 +878,51 @@ inline void FloatDepthwiseConvAccumRowGeneric(
   }
 }
 
+#if defined(USE_RVV)
+inline void FloatDepthwiseConvAccumRowRvvDepthMultiplier1(
+    int stride, int dilation_factor, int input_depth, int input_width,
+    const float* input_data, int pad_width, int depth_multiplier,
+    int filter_width, const float* filter_data, int out_x_buffer_start,
+    int out_x_buffer_end, int output_depth, float* acc_buffer) {
+  TFLITE_DCHECK_EQ(depth_multiplier, 1);
+  TFLITE_DCHECK_EQ(output_depth, input_depth);
+  const float* filter_base_ptr = filter_data;
+  for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+    const int out_x_loop_start = std::max(
+        out_x_buffer_start,
+        (pad_width - dilation_factor * filter_x + stride - 1) / stride);
+    const int out_x_loop_end = std::min(
+        out_x_buffer_end,
+        (pad_width + input_width - dilation_factor * filter_x + stride - 1) /
+            stride);
+
+    float* acc_buffer_ptr =
+        acc_buffer + (out_x_loop_start - out_x_buffer_start) * output_depth;
+    const int in_x_origin =
+        (out_x_loop_start * stride) - pad_width + dilation_factor * filter_x;
+    const float* input_ptr = input_data + in_x_origin * input_depth;
+    const int input_ptr_increment = stride * input_depth;
+    for (int out_x = out_x_loop_start; out_x < out_x_loop_end; ++out_x) {
+      for (int channel = 0; channel < input_depth;) {
+        const size_t vl = __riscv_vsetvl_e32m4(input_depth - channel);
+        const vfloat32m4_t input =
+            __riscv_vle32_v_f32m4(input_ptr + channel, vl);
+        const vfloat32m4_t filter =
+            __riscv_vle32_v_f32m4(filter_base_ptr + channel, vl);
+        const vfloat32m4_t product = __riscv_vfmul_vv_f32m4(input, filter, vl);
+        vfloat32m4_t acc = __riscv_vle32_v_f32m4(acc_buffer_ptr + channel, vl);
+        acc = __riscv_vfadd_vv_f32m4(acc, product, vl);
+        __riscv_vse32_v_f32m4(acc_buffer_ptr + channel, acc, vl);
+        channel += vl;
+      }
+      input_ptr += input_ptr_increment;
+      acc_buffer_ptr += output_depth;
+    }
+    filter_base_ptr += output_depth;
+  }
+}
+#endif  // USE_RVV
+
 // Initializes the accumulator buffer with bias values.
 inline void DepthwiseConvInitAccBuffer(int num_output_pixels, int output_depth,
                                        const float* bias_data,
@@ -990,12 +1036,18 @@ inline void DepthwiseConvImpl(
 
 #endif  // USE_NEON
 
-#undef TFMINI_USE_DEPTHWISECONV_KERNEL
+#ifdef USE_RVV
+  if (!row_accum_func && depth_multiplier == 1) {
+    row_accum_func = FloatDepthwiseConvAccumRowRvvDepthMultiplier1;
+  }
+#endif  // USE_RVV
 
   // No matching fast kernel found, use slow fallback.
   if (!row_accum_func) {
     row_accum_func = FloatDepthwiseConvAccumRowGeneric;
   }
+
+#undef TFMINI_USE_DEPTHWISECONV_KERNEL
 
   const int input_height_stride = input_shape.Dims(3) * input_shape.Dims(2);
   const int input_batch_stride = input_height_stride * input_shape.Dims(1);
@@ -1095,6 +1147,16 @@ inline void DepthwiseConvImpl(
           vst1q_f32(output_ptr, acc);
           output_ptr += 4;
         }
+#elif defined(USE_RVV)
+        for (; i < num_output_values;) {
+          const size_t vl = __riscv_vsetvl_e32m4(num_output_values - i);
+          vfloat32m4_t acc = __riscv_vle32_v_f32m4(acc_buffer + i, vl);
+          acc = __riscv_vfmax_vf_f32m4(acc, output_activation_min, vl);
+          acc = __riscv_vfmin_vf_f32m4(acc, output_activation_max, vl);
+          __riscv_vse32_v_f32m4(output_ptr, acc, vl);
+          output_ptr += vl;
+          i += vl;
+        }
 #endif
         // Handle leftover values, one by one. This is very slow.
         for (; i < num_output_values; i++) {
@@ -1109,7 +1171,6 @@ inline void DepthwiseConvImpl(
     output_ptr += batch_step;
   }
 }
-
 
 }  // namespace optimized_ops
 }  // namespace tflite
