@@ -1486,8 +1486,8 @@ inline void ReluX(const tflite::ReluParams& params,
       const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
       vint32m4_t output =
           __riscv_vsub_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-              __riscv_vzext_vf2_u32m4(input_u16, vl)),
-          params.input_offset, vl);
+                                    __riscv_vzext_vf2_u32m4(input_u16, vl)),
+                                params.input_offset, vl);
       output = rvv_ops::MultiplyByQuantizedMultiplier(
           output, params.output_multiplier, params.output_shift, vl);
       output = __riscv_vadd_vx_i32m4(output, params.output_offset, vl);
@@ -1800,12 +1800,12 @@ inline void AddElementwise(int size, const ArithmeticParams& params,
     const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
     const vint32m4_t input1 =
         __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-            __riscv_vzext_vf2_u32m4(input1_u16, vl)),
-        params.input1_offset, vl);
+                                  __riscv_vzext_vf2_u32m4(input1_u16, vl)),
+                              params.input1_offset, vl);
     const vint32m4_t input2 =
         __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-            __riscv_vzext_vf2_u32m4(input2_u16, vl)),
-        params.input2_offset, vl);
+                                  __riscv_vzext_vf2_u32m4(input2_u16, vl)),
+                              params.input2_offset, vl);
 
     const vint32m4_t shifted_input1 =
         __riscv_vsll_vx_i32m4(input1, params.left_shift, vl);
@@ -1945,8 +1945,8 @@ inline void AddScalarBroadcast(int size, const ArithmeticParams& params,
     const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
     const vint32m4_t input2 =
         __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-            __riscv_vzext_vf2_u32m4(input2_u16, vl)),
-        params.input2_offset, vl);
+                                  __riscv_vzext_vf2_u32m4(input2_u16, vl)),
+                              params.input2_offset, vl);
     const vint32m4_t shifted_input2 =
         __riscv_vsll_vx_i32m4(input2, params.left_shift, vl);
     const vint32m4_t scaled_input2 =
@@ -2484,12 +2484,12 @@ inline void MulElementwise(int size, const ArithmeticParams& params,
     const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
     const vint32m4_t input1 =
         __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-            __riscv_vzext_vf2_u32m4(input1_u16, vl)),
-        params.input1_offset, vl);
+                                  __riscv_vzext_vf2_u32m4(input1_u16, vl)),
+                              params.input1_offset, vl);
     const vint32m4_t input2 =
         __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-            __riscv_vzext_vf2_u32m4(input2_u16, vl)),
-        params.input2_offset, vl);
+                                  __riscv_vzext_vf2_u32m4(input2_u16, vl)),
+                              params.input2_offset, vl);
     const vint32m4_t product = __riscv_vmul_vv_i32m4(input1, input2, vl);
     vint32m4_t raw_output = rvv_ops::MultiplyByQuantizedMultiplier(
         product, params.output_multiplier, params.output_shift, vl);
@@ -2583,8 +2583,8 @@ inline void MulSimpleBroadcast(int size, const ArithmeticParams& params,
     const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
     const vint32m4_t input2 =
         __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-            __riscv_vzext_vf2_u32m4(input2_u16, vl)),
-        params.input2_offset, vl);
+                                  __riscv_vzext_vf2_u32m4(input2_u16, vl)),
+                              params.input2_offset, vl);
     const vint32m4_t product = __riscv_vmul_vx_i32m4(input2, input1_val, vl);
     vint32m4_t raw_output = rvv_ops::MultiplyByQuantizedMultiplier(
         product, params.output_multiplier, params.output_shift, vl);
@@ -2995,12 +2995,12 @@ inline void SubElementwise(int size, const ArithmeticParams& params,
     const vuint16m2_t input2_u16 = __riscv_vzext_vf2_u16m2(input2_u8, vl);
     const vint32m4_t input1 =
         __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-            __riscv_vzext_vf2_u32m4(input1_u16, vl)),
-        params.input1_offset, vl);
+                                  __riscv_vzext_vf2_u32m4(input1_u16, vl)),
+                              params.input1_offset, vl);
     const vint32m4_t input2 =
         __riscv_vadd_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-            __riscv_vzext_vf2_u32m4(input2_u16, vl)),
-        params.input2_offset, vl);
+                                  __riscv_vzext_vf2_u32m4(input2_u16, vl)),
+                              params.input2_offset, vl);
 
     const vint32m4_t shifted_input1 =
         __riscv_vsll_vx_i32m4(input1, params.left_shift, vl);
@@ -3071,7 +3071,7 @@ inline void SubWithActivation<float>(const ArithmeticParams& params,
                                      const RuntimeShape& input2_shape,
                                      const float* input2_data,
                                      const RuntimeShape& output_shape,
-    float* output_data) {
+                                     float* output_data) {
   ruy::profiler::ScopeLabel label("SubWithActivation_optimized/RVV");
   TFLITE_DCHECK_EQ(input1_shape.FlatSize(), input2_shape.FlatSize());
   const int flat_size =
@@ -3984,7 +3984,7 @@ inline void MaxPool(const PoolParams& params, const RuntimeShape& input_shape,
                     __riscv_vle8_v_u8m1(input_channel_ptr, vl);
                 __riscv_vse8_v_u8m1(acc + channel,
                                     __riscv_vmaxu_vv_u8m1(acc_reg, input, vl),
-                    vl);
+                                    vl);
                 input_channel_ptr += vl;
                 channel += vl;
               }
@@ -5196,6 +5196,16 @@ inline void BatchToSpaceND(const RuntimeShape& unextended_input1_shape,
 
 template <typename T>
 TFLITE_NOINLINE void TypedMemset(void* ptr, T value, size_t num) {
+#if defined(USE_RVV)
+  if constexpr (std::is_same<T, bool>::value || std::is_same<T, float>::value ||
+                std::is_same<T, int8_t>::value ||
+                std::is_same<T, uint8_t>::value ||
+                std::is_same<T, int16_t>::value ||
+                std::is_same<T, int32_t>::value) {
+    rvv_ops::FillVector(static_cast<T*>(ptr), num, value);
+    return;
+  }
+#endif  // USE_RVV
   // Optimization for common cases where memset() will suffice.
   if (value == 0 || std::is_same<T, uint8_t>::value) {
     memset(ptr, value, num * sizeof(T));
@@ -5311,7 +5321,7 @@ inline void PadImpl(const tflite::PadParams& op_params,
                         Offset(ext_input_shape, out_b - left_b_padding,
                                out_p - left_s1_padding, out_h - left_s2_padding,
                                out_w - left_s3_padding, 0);
-          memcpy(out, in, input_depth * sizeof(T));
+          rvv_ops::CopyVector(in, out, static_cast<size_t>(input_depth));
 
           if (right_c_padding != 0) {
             TypedMemset<T>(
@@ -6701,8 +6711,8 @@ inline void Requantize<uint8_t, int8_t>(const uint8_t* input_data, int32_t size,
     const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
     vint32m4_t input =
         __riscv_vsub_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-            __riscv_vzext_vf2_u32m4(input_u16, vl)),
-        input_zeropoint, vl);
+                                  __riscv_vzext_vf2_u32m4(input_u16, vl)),
+                              input_zeropoint, vl);
     vint32m4_t output = rvv_ops::MultiplyByQuantizedMultiplier(
         input, effective_scale_multiplier, effective_scale_shift, vl);
     output = __riscv_vadd_vx_i32m4(output, output_zeropoint, vl);
@@ -6898,8 +6908,8 @@ inline void Requantize<uint8_t, uint8_t>(
     const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
     vint32m4_t input =
         __riscv_vsub_vx_i32m4(__riscv_vreinterpret_v_u32m4_i32m4(
-            __riscv_vzext_vf2_u32m4(input_u16, vl)),
-        input_zeropoint, vl);
+                                  __riscv_vzext_vf2_u32m4(input_u16, vl)),
+                              input_zeropoint, vl);
     vint32m4_t output = rvv_ops::MultiplyByQuantizedMultiplier(
         input, effective_scale_multiplier, effective_scale_shift, vl);
     output = __riscv_vadd_vx_i32m4(output, output_zeropoint, vl);

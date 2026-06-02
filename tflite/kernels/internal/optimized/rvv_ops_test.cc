@@ -35,6 +35,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/integer_ops/sub.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
 #include "tflite/kernels/internal/optimized/reduce.h"
+#include "tflite/kernels/internal/optimized/resize_bilinear.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/portable_tensor_utils.h"
 #include "tflite/kernels/internal/reference/add.h"
@@ -55,6 +56,7 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/quantize.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/reference/requantize.h"
+#include "tflite/kernels/internal/reference/resize_bilinear.h"
 #include "tflite/kernels/internal/reference/sub.h"
 #include "tflite/kernels/internal/reference/svdf.h"
 #include "tflite/kernels/internal/types.h"
@@ -3124,6 +3126,82 @@ TEST(RvvOpsTest,
   }
 }
 
+TEST(RvvOpsTest, ResizeBilinearFloatMatchesReferenceAcrossVectorBoundaries) {
+  ResizeBilinearParams params = {};
+  params.align_corners = false;
+  params.half_pixel_centers = false;
+
+  for (int depth : Float32M4VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    constexpr int kBatch = 2;
+    constexpr int kInputHeight = 3;
+    constexpr int kInputWidth = 4;
+    constexpr int kOutputHeight = 5;
+    constexpr int kOutputWidth = 7;
+    const RuntimeShape input_shape({kBatch, kInputHeight, kInputWidth, depth});
+    const RuntimeShape output_size_shape({2});
+    const int32_t output_size_data[2] = {kOutputHeight, kOutputWidth};
+    const RuntimeShape output_shape(
+        {kBatch, kOutputHeight, kOutputWidth, depth});
+    std::vector<float> input(input_shape.FlatSize());
+    for (int i = 0; i < input.size(); ++i) {
+      input[i] = 0.25f + static_cast<float>((i * 7 + 3) % 31) * 0.03125f;
+    }
+    std::vector<float> actual(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    optimized_ops::ResizeBilinear(params, input_shape, input.data(),
+                                  output_size_shape, output_size_data,
+                                  output_shape, actual.data());
+    reference_ops::ResizeBilinear(params, input_shape, input.data(),
+                                  output_size_shape, output_size_data,
+                                  output_shape, expected.data());
+
+    SCOPED_TRACE(::testing::Message() << "depth=" << depth);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
+  }
+}
+
+TEST(RvvOpsTest, ResizeBilinearFloat2x2MatchesReferenceAcrossVectorBoundaries) {
+  ResizeBilinearParams params = {};
+  params.align_corners = false;
+  params.half_pixel_centers = false;
+
+  for (int depth : Float32M4VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    constexpr int kBatch = 2;
+    constexpr int kInputHeight = 3;
+    constexpr int kInputWidth = 4;
+    constexpr int kOutputHeight = kInputHeight * 2;
+    constexpr int kOutputWidth = kInputWidth * 2;
+    const RuntimeShape input_shape({kBatch, kInputHeight, kInputWidth, depth});
+    const RuntimeShape output_size_shape({2});
+    const int32_t output_size_data[2] = {kOutputHeight, kOutputWidth};
+    const RuntimeShape output_shape(
+        {kBatch, kOutputHeight, kOutputWidth, depth});
+    std::vector<float> input(input_shape.FlatSize());
+    for (int i = 0; i < input.size(); ++i) {
+      input[i] = 0.5f + static_cast<float>((i * 11 + 5) % 37) * 0.015625f;
+    }
+    std::vector<float> actual(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    optimized_ops::ResizeBilinear(params, input_shape, input.data(),
+                                  output_size_shape, output_size_data,
+                                  output_shape, actual.data());
+    reference_ops::ResizeBilinear(params, input_shape, input.data(),
+                                  output_size_shape, output_size_data,
+                                  output_shape, expected.data());
+
+    SCOPED_TRACE(::testing::Message() << "depth=" << depth);
+    ExpectFloatRelativeNearOrSpecial(actual, expected);
+  }
+}
+
 TEST(RvvOpsTest, ConcatenationFloatMatchesScalarAcrossVectorBoundaries) {
   for (int inner_size : ElementLengthsAroundByteVlmax<float>()) {
     if (inner_size == 0) {
@@ -3145,7 +3223,7 @@ TEST(RvvOpsTest, ConcatenationFloatMatchesScalarAcrossVectorBoundaries) {
     std::vector<float> actual(output_shape.FlatSize());
     std::vector<float> expected(output_shape.FlatSize());
 
-    reference_ops::Concatenation(params, input_shapes, input_data, output_shape,
+    optimized_ops::Concatenation(params, input_shapes, input_data, output_shape,
                                  actual.data());
     int out = 0;
     for (int outer = 0; outer < kOuter; ++outer) {
@@ -3183,7 +3261,7 @@ TEST(RvvOpsTest, PadInt8MatchesScalarAcrossVectorBoundaries) {
     std::vector<int8_t> actual(output_shape.FlatSize());
     std::vector<int8_t> expected(output_shape.FlatSize(), pad_value);
 
-    reference_ops::Pad(params, input_shape, input.data(), &pad_value,
+    optimized_ops::Pad(params, input_shape, input.data(), &pad_value,
                        output_shape, actual.data());
     for (int b = 0; b < input_shape.Dims(0); ++b) {
       for (int p = 0; p < input_shape.Dims(1); ++p) {

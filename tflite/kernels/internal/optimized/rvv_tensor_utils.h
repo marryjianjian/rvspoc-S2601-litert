@@ -41,13 +41,13 @@ inline void CopyBytes(const void* src, void* dst, size_t bytes) {
 }
 
 template <typename T>
-inline void CopyVector(const T* input, T* output, int size) {
+inline void CopyVector(const T* input, T* output, size_t size) {
   CopyBytes(input, output, static_cast<size_t>(size) * sizeof(T));
 }
 
 template <typename T>
-inline void FillVector(T* output, int size, T value) {
-  int i = 0;
+inline void FillVector(T* output, size_t size, T value) {
+  size_t i = 0;
   if constexpr (std::is_same<T, float>::value) {
     for (; i < size;) {
       const size_t vl = __riscv_vsetvl_e32m4(size - i);
@@ -105,12 +105,12 @@ inline void CopyBytes(const void* src, void* dst, size_t bytes) {
 }
 
 template <typename T>
-inline void CopyVector(const T* input, T* output, int size) {
+inline void CopyVector(const T* input, T* output, size_t size) {
   std::memcpy(output, input, static_cast<size_t>(size) * sizeof(T));
 }
 
 template <typename T>
-inline void FillVector(T* output, int size, T value) {
+inline void FillVector(T* output, size_t size, T value) {
   std::fill_n(output, size, value);
 }
 

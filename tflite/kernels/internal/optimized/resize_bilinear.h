@@ -28,6 +28,7 @@ limitations under the License.
 #include "tflite/core/c/common.h"
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/compatibility.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/reference_ops.h"
 #include "tflite/kernels/internal/tensor.h"
@@ -1312,6 +1313,19 @@ inline void ResizeBilinearKernel(const float* input_ptr, int32_t depth,
     input_ptr++;
   }
 }
+#elif defined(USE_RVV)
+inline void ResizeBilinearKernel(const float* input_ptr, int32_t depth,
+                                 float scale, float* output_ptr) {
+  for (int32_t i = 0; i < depth;) {
+    const size_t vl = __riscv_vsetvl_e32m4(depth - i);
+    const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_ptr + i, vl);
+    const vfloat32m4_t scaled = __riscv_vfmul_vf_f32m4(input, scale, vl);
+    vfloat32m4_t output = __riscv_vle32_v_f32m4(output_ptr + i, vl);
+    output = __riscv_vfadd_vv_f32m4(output, scaled, vl);
+    __riscv_vse32_v_f32m4(output_ptr + i, output, vl);
+    i += vl;
+  }
+}
 #else
 inline void ResizeBilinearKernel(const float* input_ptr, int32 depth,
                                  float scale, float* output_ptr) {
@@ -1462,6 +1476,38 @@ inline void ResizeBilinearKernel2x2(int32_t x0, int32_t x1, int32_t y0,
     // Bottom right corner.
     output_data[output_offset + output_x_offset + output_y_offset] =
         (output + ((x1y0 + x1y1) / 2)) / 2;
+  }
+#elif defined(USE_RVV)
+  for (int32_t ch = 0; ch < depth;) {
+    const size_t vl = __riscv_vsetvl_e32m4(depth - ch);
+    const float* input_ptr =
+        &input_data[Offset(input_shape, batch, y0, x0, ch)];
+    const vfloat32m4_t x0y0 = __riscv_vle32_v_f32m4(input_ptr, vl);
+    const vfloat32m4_t x1y0 =
+        __riscv_vle32_v_f32m4(input_ptr + input_x_offset, vl);
+    const vfloat32m4_t x0y1 =
+        __riscv_vle32_v_f32m4(input_ptr + input_y_offset, vl);
+    const vfloat32m4_t x1y1 =
+        __riscv_vle32_v_f32m4(input_ptr + input_x_offset + input_y_offset, vl);
+
+    float* output_ptr = &output_data[Offset(output_shape, batch, y, x, ch)];
+    __riscv_vse32_v_f32m4(output_ptr, x0y0, vl);
+
+    vfloat32m4_t top_right = __riscv_vfadd_vv_f32m4(x0y0, x1y0, vl);
+    top_right = __riscv_vfmul_vf_f32m4(top_right, 0.5f, vl);
+    __riscv_vse32_v_f32m4(output_ptr + output_x_offset, top_right, vl);
+
+    vfloat32m4_t bottom_left = __riscv_vfadd_vv_f32m4(x0y0, x0y1, vl);
+    bottom_left = __riscv_vfmul_vf_f32m4(bottom_left, 0.5f, vl);
+    __riscv_vse32_v_f32m4(output_ptr + output_y_offset, bottom_left, vl);
+
+    vfloat32m4_t bottom_right = __riscv_vfadd_vv_f32m4(x1y0, x1y1, vl);
+    bottom_right = __riscv_vfmul_vf_f32m4(bottom_right, 0.5f, vl);
+    bottom_right = __riscv_vfadd_vv_f32m4(bottom_left, bottom_right, vl);
+    bottom_right = __riscv_vfmul_vf_f32m4(bottom_right, 0.5f, vl);
+    __riscv_vse32_v_f32m4(output_ptr + output_x_offset + output_y_offset,
+                          bottom_right, vl);
+    ch += vl;
   }
 #else
   for (int ch = 0; ch < depth; ch++) {
