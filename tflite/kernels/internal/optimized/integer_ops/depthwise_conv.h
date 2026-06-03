@@ -20,7 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <vector>
 
-#include "ruy/profiler/instrumentation.h"  // from @ruy
+#include "ruy/profiler/instrumentation.h" // from @ruy
 #include "tflite/kernels/cpu_backend_context.h"
 #include "tflite/kernels/cpu_backend_threadpool.h"
 #include "tflite/kernels/internal/compatibility.h"
@@ -44,12 +44,11 @@ template <bool kAllowStrided, int kFixedInputDepth, int kFixedDepthMultiplier>
 struct QuantizedDepthwiseConvKernel {};
 
 #ifdef USE_NEON
-template <>
-struct QuantizedDepthwiseConvKernel<true, 8, 2> {
+template <> struct QuantizedDepthwiseConvKernel<true, 8, 2> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8x2_t filter_s8;
     filter_s8.val[0] = vld1_s8(filter_ptr);
@@ -90,12 +89,11 @@ struct QuantizedDepthwiseConvKernel<true, 8, 2> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<false, 8, 1> {
+template <> struct QuantizedDepthwiseConvKernel<false, 8, 1> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     const int8x8_t filter_s8 = vld1_s8(filter_ptr);
     const int16x8_t filter = vmovl_s8(filter_s8);
@@ -157,12 +155,11 @@ struct QuantizedDepthwiseConvKernel<false, 8, 1> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<false, 4, 2> {
+template <> struct QuantizedDepthwiseConvKernel<false, 4, 2> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     const int8x8_t filter_s8 = vld1_s8(filter_ptr);
     const int16x8_t filter = vmovl_s8(filter_s8);
@@ -225,12 +222,11 @@ struct QuantizedDepthwiseConvKernel<false, 4, 2> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<false, 2, 8> {
+template <> struct QuantizedDepthwiseConvKernel<false, 2, 8> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int16x8_t filter[2];
     for (int i = 0; i < 2; i++) {
@@ -299,12 +295,11 @@ struct QuantizedDepthwiseConvKernel<false, 2, 8> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<false, 2, 2> {
+template <> struct QuantizedDepthwiseConvKernel<false, 2, 2> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8_t filter_s8 = vdup_n_s8(0);
     filter_s8 = vset_lane_s8(filter_ptr[0], filter_s8, 0);
@@ -362,12 +357,11 @@ struct QuantizedDepthwiseConvKernel<false, 2, 2> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<false, 2, 1> {
+template <> struct QuantizedDepthwiseConvKernel<false, 2, 1> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8_t filter_s8 = vdup_n_s8(0);
     filter_s8 = vset_lane_s8(filter_ptr[0], filter_s8, 0);
@@ -472,12 +466,11 @@ struct QuantizedDepthwiseConvKernel<false, 2, 1> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<false, 1, 2> {
+template <> struct QuantizedDepthwiseConvKernel<false, 1, 2> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8_t filter_s8 = vdup_n_s8(0);
     filter_s8 = vset_lane_s8(filter_ptr[0], filter_s8, 0);
@@ -530,12 +523,11 @@ struct QuantizedDepthwiseConvKernel<false, 1, 2> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<false, 1, 4> {
+template <> struct QuantizedDepthwiseConvKernel<false, 1, 4> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8_t filter_s8 = vdup_n_s8(0);
     filter_s8 = vset_lane_s8(filter_ptr[0], filter_s8, 0);
@@ -622,12 +614,11 @@ struct QuantizedDepthwiseConvKernel<false, 1, 4> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<false, 4, 1> {
+template <> struct QuantizedDepthwiseConvKernel<false, 4, 1> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8_t filter_s8 = vdup_n_s8(0);
     filter_s8 = vset_lane_s8(filter_ptr[0], filter_s8, 0);
@@ -689,12 +680,11 @@ struct QuantizedDepthwiseConvKernel<false, 4, 1> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<false, 4, 4> {
+template <> struct QuantizedDepthwiseConvKernel<false, 4, 4> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int16x8_t filter[2];
     for (int i = 0; i < 2; i++) {
@@ -772,12 +762,11 @@ struct QuantizedDepthwiseConvKernel<false, 4, 4> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 0, 3> {
+template <> struct QuantizedDepthwiseConvKernel<true, 0, 3> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // We will have to duplicate bytes in a NEON register, 3-fold.
     // We will do that by register-level table-look-up using VTBL instructions.
     // Here we prepare the registers containing the table-lookup indices.
@@ -791,8 +780,8 @@ struct QuantizedDepthwiseConvKernel<true, 0, 3> {
 
     // Handle one output pixel at a time.
     for (int outp = 0; outp < num_output_pixels; outp++) {
-      const int8_t* local_filter_ptr = filter_ptr;
-      const int8_t* local_input_ptr = input_ptr;
+      const int8_t *local_filter_ptr = filter_ptr;
+      const int8_t *local_input_ptr = input_ptr;
       int ic = 0;
       // Handle 8 input channels at a time.
       for (; ic <= input_depth - 8; ic += 8) {
@@ -855,16 +844,15 @@ struct QuantizedDepthwiseConvKernel<true, 0, 3> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 0, 2> {
+template <> struct QuantizedDepthwiseConvKernel<true, 0, 2> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Handle one output pixel at a time.
     for (int outp = 0; outp < num_output_pixels; outp++) {
-      const int8_t* local_filter_ptr = filter_ptr;
-      const int8_t* local_input_ptr = input_ptr;
+      const int8_t *local_filter_ptr = filter_ptr;
+      const int8_t *local_input_ptr = input_ptr;
       int ic = 0;
       // Handle 8 input channels at a time.
       for (; ic <= input_depth - 8; ic += 8) {
@@ -918,16 +906,15 @@ struct QuantizedDepthwiseConvKernel<true, 0, 2> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 0, 1> {
+template <> struct QuantizedDepthwiseConvKernel<true, 0, 1> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Handle one output pixel at a time.
     for (int outp = 0; outp < num_output_pixels; outp++) {
-      const int8_t* local_filter_ptr = filter_ptr;
-      const int8_t* local_input_ptr = input_ptr;
+      const int8_t *local_filter_ptr = filter_ptr;
+      const int8_t *local_input_ptr = input_ptr;
       int ic = 0;
       // Handle 16 input channels at a time.
       for (; ic <= input_depth - 16; ic += 16) {
@@ -999,12 +986,11 @@ struct QuantizedDepthwiseConvKernel<true, 0, 1> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 16, 1> {
+template <> struct QuantizedDepthwiseConvKernel<true, 16, 1> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8_t filter_s8[2];
     for (int i = 0; i < 2; i++) {
@@ -1050,12 +1036,11 @@ struct QuantizedDepthwiseConvKernel<true, 16, 1> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 8, 1> {
+template <> struct QuantizedDepthwiseConvKernel<true, 8, 1> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     const int8x8_t filter_s8 = vld1_s8(filter_ptr);
     const int16x8_t filter = vmovl_s8(filter_s8);
@@ -1083,12 +1068,11 @@ struct QuantizedDepthwiseConvKernel<true, 8, 1> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 1, 16> {
+template <> struct QuantizedDepthwiseConvKernel<true, 1, 16> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8_t filter_s8[2];
     for (int i = 0; i < 2; i++) {
@@ -1124,12 +1108,11 @@ struct QuantizedDepthwiseConvKernel<true, 1, 16> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 1, 32> {
+template <> struct QuantizedDepthwiseConvKernel<true, 1, 32> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8_t filter_s8_0 = vld1_s8(filter_ptr + 8 * 0);
     int8x8_t filter_s8_1 = vld1_s8(filter_ptr + 8 * 1);
@@ -1176,12 +1159,11 @@ struct QuantizedDepthwiseConvKernel<true, 1, 32> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 1, 20> {
+template <> struct QuantizedDepthwiseConvKernel<true, 1, 20> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     // NEON wants to load 8 bytes at a time, but 20 is not divisible by 8.
     // We load the first 16 bytes into filter_s8_{0,1} as usual.
@@ -1222,12 +1204,11 @@ struct QuantizedDepthwiseConvKernel<true, 1, 20> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 1, 8> {
+template <> struct QuantizedDepthwiseConvKernel<true, 1, 8> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     const int8x8_t filter_s8 = vld1_s8(filter_ptr);
     const int16x8_t filter = vmovl_s8(filter_s8);
@@ -1253,12 +1234,11 @@ struct QuantizedDepthwiseConvKernel<true, 1, 8> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 2, 1> {
+template <> struct QuantizedDepthwiseConvKernel<true, 2, 1> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8_t filter_s8 = vdup_n_s8(0);
     filter_s8 = vset_lane_s8(filter_ptr[0], filter_s8, 0);
@@ -1276,10 +1256,10 @@ struct QuantizedDepthwiseConvKernel<true, 2, 1> {
       // Load the inputs, add input_offset.
       int16x4_t input_s16 = vdup_n_s16(0);
       input_s16 = vset_lane_s16(
-          (reinterpret_cast<const int16_t*>(input_ptr))[0], input_s16, 0);
+          (reinterpret_cast<const int16_t *>(input_ptr))[0], input_s16, 0);
       input_ptr += input_ptr_increment;
       input_s16 = vset_lane_s16(
-          (reinterpret_cast<const int16_t*>(input_ptr))[0], input_s16, 1);
+          (reinterpret_cast<const int16_t *>(input_ptr))[0], input_s16, 1);
       input_ptr += input_ptr_increment;
       input_s16 = vget_low_s16(vmovl_s8(vreinterpret_s8_s16(input_s16)));
       const int16x4_t input = vadd_s16(input_s16, vdup_n_s16(input_offset));
@@ -1312,12 +1292,11 @@ struct QuantizedDepthwiseConvKernel<true, 2, 1> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<true, 4, 1> {
+template <> struct QuantizedDepthwiseConvKernel<true, 4, 1> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     if (num_output_pixels <= 0) {
       return;
     }
@@ -1372,12 +1351,11 @@ struct QuantizedDepthwiseConvKernel<true, 4, 1> {
   }
 };
 
-template <>
-struct QuantizedDepthwiseConvKernel<false, 12, 1> {
+template <> struct QuantizedDepthwiseConvKernel<false, 12, 1> {
   static void Run(int num_output_pixels, int input_depth, int depth_multiplier,
-                  const int8_t* input_ptr, int16_t input_offset,
-                  int input_ptr_increment, const int8_t* filter_ptr,
-                  int32_t* acc_buffer_ptr) {
+                  const int8_t *input_ptr, int16_t input_offset,
+                  int input_ptr_increment, const int8_t *filter_ptr,
+                  int32_t *acc_buffer_ptr) {
     // Load the filters.
     int8x8_t filter_s8_0 = vld1_s8(filter_ptr);
     int8x8_t filter_s8_1 = vld1_s8(filter_ptr + 4);
@@ -1424,10 +1402,10 @@ struct QuantizedDepthwiseConvKernel<false, 12, 1> {
 template <bool kAllowStrided, int kFixedInputDepth, int kFixedDepthMultiplier>
 void QuantizedDepthwiseConvAccumRow(
     int stride, int dilation_factor, int input_depth, int input_width,
-    const int8_t* input_data, int16_t input_offset, int pad_width,
-    int depth_multiplier, int filter_width, const int8_t* filter_data,
+    const int8_t *input_data, int16_t input_offset, int pad_width,
+    int depth_multiplier, int filter_width, const int8_t *filter_data,
     int out_x_buffer_start, int out_x_buffer_end, int output_depth,
-    int32_t* acc_buffer) {
+    int32_t *acc_buffer) {
   ruy::profiler::ScopeLabel label(TFLITE_PRETTY_FUNCTION);
   // Consistency check parameters. This is important in particular to ensure
   // that we keep the number of template instantiations minimal, so we don't
@@ -1443,7 +1421,7 @@ void QuantizedDepthwiseConvAccumRow(
   }
   TFLITE_DCHECK_EQ(output_depth, input_depth * depth_multiplier);
   const int input_ptr_increment = stride * input_depth;
-  const int8_t* filter_base_ptr = filter_data;
+  const int8_t *filter_base_ptr = filter_data;
   for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
     // For the current (filter_x, filter_y) point in the filter,
     // compute the boundaries of the corresponding output row segment.
@@ -1479,11 +1457,11 @@ void QuantizedDepthwiseConvAccumRow(
     const int out_x_loop_end =
         std::min(out_x_buffer_end, out_x_loop_end_unclamped);
 
-    int32_t* acc_buffer_ptr =
+    int32_t *acc_buffer_ptr =
         acc_buffer + (out_x_loop_start - out_x_buffer_start) * output_depth;
     const int in_x_origin =
         (out_x_loop_start * stride) - pad_width + dilation_factor * filter_x;
-    const int8_t* input_ptr = input_data + in_x_origin * input_depth;
+    const int8_t *input_ptr = input_data + in_x_origin * input_depth;
     const int num_output_pixels = out_x_loop_end - out_x_loop_start;
     QuantizedDepthwiseConvKernel<
         kAllowStrided, kFixedInputDepth,
@@ -1498,29 +1476,29 @@ void QuantizedDepthwiseConvAccumRow(
 // generic fallback of DepthwiseConvAccumRow, portable, non-templatized.
 inline void QuantizedDepthwiseConvAccumRowGeneric(
     int stride, int dilation_factor, int input_depth, int input_width,
-    const int8_t* input_data, int16_t input_offset, int pad_width,
-    int depth_multiplier, int filter_width, const int8_t* filter_data,
+    const int8_t *input_data, int16_t input_offset, int pad_width,
+    int depth_multiplier, int filter_width, const int8_t *filter_data,
     int out_x_buffer_start, int out_x_buffer_end, int output_depth,
-    int32_t* acc_buffer) {
+    int32_t *acc_buffer) {
   ruy::profiler::ScopeLabel label("DepthwiseConvAccumRowGeneric (slow)");
-  const int8_t* filter_base_ptr = filter_data;
+  const int8_t *filter_base_ptr = filter_data;
   for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
     const int out_x_loop_start = std::max(
         out_x_buffer_start,
         (pad_width - dilation_factor * filter_x + stride - 1) / stride);
-    const int out_x_loop_end = std::min(
-        out_x_buffer_end,
-        (pad_width + input_width - dilation_factor * filter_x + stride - 1) /
-            stride);
+    const int out_x_loop_end =
+        std::min(out_x_buffer_end, (pad_width + input_width -
+                                    dilation_factor * filter_x + stride - 1) /
+                                       stride);
 
-    int32_t* acc_buffer_ptr =
+    int32_t *acc_buffer_ptr =
         acc_buffer + (out_x_loop_start - out_x_buffer_start) * output_depth;
     const int in_x_origin =
         (out_x_loop_start * stride) - pad_width + dilation_factor * filter_x;
-    const int8_t* input_ptr = input_data + in_x_origin * input_depth;
+    const int8_t *input_ptr = input_data + in_x_origin * input_depth;
     const int input_ptr_increment = (stride - 1) * input_depth;
     for (int out_x = out_x_loop_start; out_x < out_x_loop_end; out_x++) {
-      const int8_t* filter_ptr = filter_base_ptr;
+      const int8_t *filter_ptr = filter_base_ptr;
       for (int ic = 0; ic < input_depth; ++ic) {
         const int16_t input_val = *input_ptr++ + input_offset;
         for (int m = 0; m < depth_multiplier; m++) {
@@ -1537,33 +1515,32 @@ inline void QuantizedDepthwiseConvAccumRowGeneric(
 #if defined(USE_RVV)
 inline void QuantizedDepthwiseConvAccumRowRvvDepthMultiplier1(
     int stride, int dilation_factor, int input_depth, int input_width,
-    const int8_t* input_data, int16_t input_offset, int pad_width,
-    int depth_multiplier, int filter_width, const int8_t* filter_data,
+    const int8_t *input_data, int16_t input_offset, int pad_width,
+    int depth_multiplier, int filter_width, const int8_t *filter_data,
     int out_x_buffer_start, int out_x_buffer_end, int output_depth,
-    int32_t* acc_buffer) {
+    int32_t *acc_buffer) {
   TFLITE_DCHECK_EQ(depth_multiplier, 1);
   TFLITE_DCHECK_EQ(output_depth, input_depth);
-  const int8_t* filter_base_ptr = filter_data;
+  const int8_t *filter_base_ptr = filter_data;
   for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
     const int out_x_loop_start = std::max(
         out_x_buffer_start,
         (pad_width - dilation_factor * filter_x + stride - 1) / stride);
-    const int out_x_loop_end = std::min(
-        out_x_buffer_end,
-        (pad_width + input_width - dilation_factor * filter_x + stride - 1) /
-            stride);
+    const int out_x_loop_end =
+        std::min(out_x_buffer_end, (pad_width + input_width -
+                                    dilation_factor * filter_x + stride - 1) /
+                                       stride);
 
-    int32_t* acc_buffer_ptr =
+    int32_t *acc_buffer_ptr =
         acc_buffer + (out_x_loop_start - out_x_buffer_start) * output_depth;
     const int in_x_origin =
         (out_x_loop_start * stride) - pad_width + dilation_factor * filter_x;
-    const int8_t* input_ptr = input_data + in_x_origin * input_depth;
+    const int8_t *input_ptr = input_data + in_x_origin * input_depth;
     const int input_ptr_increment = stride * input_depth;
     for (int out_x = out_x_loop_start; out_x < out_x_loop_end; ++out_x) {
       for (int channel = 0; channel < input_depth;) {
         const size_t vl = __riscv_vsetvl_e8m1(input_depth - channel);
-        const vint8m1_t input_i8 =
-            __riscv_vle8_v_i8m1(input_ptr + channel, vl);
+        const vint8m1_t input_i8 = __riscv_vle8_v_i8m1(input_ptr + channel, vl);
         const vint8m1_t filter_i8 =
             __riscv_vle8_v_i8m1(filter_base_ptr + channel, vl);
         vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
@@ -1582,12 +1559,12 @@ inline void QuantizedDepthwiseConvAccumRowRvvDepthMultiplier1(
     filter_base_ptr += output_depth;
   }
 }
-#endif  // USE_RVV
+#endif // USE_RVV
 
 // Initializes the accumulator buffer with bias values.
 inline void DepthwiseConvInitAccBuffer(int num_output_pixels, int output_depth,
-                                       const int32_t* bias_data,
-                                       int32_t* acc_buffer) {
+                                       const int32_t *bias_data,
+                                       int32_t *acc_buffer) {
   int i = 0;
 #ifdef USE_NEON
   if (output_depth == 1) {
@@ -1657,13 +1634,196 @@ inline void DepthwiseConvInitAccBuffer(int num_output_pixels, int output_depth,
   }
 }
 
+inline bool RiscvDepthwiseConv3x3FilterPerChannelSupported(
+    const DepthwiseParams &params, const RuntimeShape &input_shape,
+    const RuntimeShape &filter_shape, const RuntimeShape &bias_shape,
+    const RuntimeShape &output_shape, int thread_dim) {
+  if (input_shape.DimensionsCount() != 4 ||
+      filter_shape.DimensionsCount() != 4 ||
+      output_shape.DimensionsCount() != 4) {
+    return false;
+  }
+  const int input_depth = input_shape.Dims(3);
+  const int output_depth = output_shape.Dims(3);
+  return params.depth_multiplier == 1 && params.dilation_width_factor == 1 &&
+         params.dilation_height_factor == 1 && filter_shape.Dims(1) == 3 &&
+         filter_shape.Dims(2) == 3 && filter_shape.Dims(3) == output_depth &&
+         input_depth == output_depth && bias_shape.FlatSize() == output_depth &&
+         (thread_dim == 0 || thread_dim == 1);
+}
+
+inline void RiscvScalarDepthwiseConv3x3FilterPerChannel(
+    const DepthwiseParams &params, const int32_t *output_multiplier,
+    const int32_t *output_shift, const RuntimeShape &input_shape,
+    const int8_t *input_data, const RuntimeShape &filter_shape,
+    const int8_t *filter_data, const RuntimeShape &bias_shape,
+    const int32_t *bias_data, const RuntimeShape &output_shape,
+    int8_t *output_data, int thread_start, int thread_end, int thread_dim) {
+  (void)bias_shape;
+  const int stride_width = params.stride_width;
+  const int stride_height = params.stride_height;
+  const int pad_width = params.padding_values.width;
+  const int pad_height = params.padding_values.height;
+  const int32_t input_offset = params.input_offset;
+  const int32_t output_offset = params.output_offset;
+  const int32_t output_activation_min = params.quantized_activation_min;
+  const int32_t output_activation_max = params.quantized_activation_max;
+  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int input_height = input_shape.Dims(1);
+  const int input_width = input_shape.Dims(2);
+  const int output_height = output_shape.Dims(1);
+  const int output_width = output_shape.Dims(2);
+  const int output_depth = output_shape.Dims(3);
+
+  int batch_start = 0;
+  int batch_end = batches;
+  int row_start = 0;
+  int row_end = output_height;
+  if (thread_dim == 0) {
+    batch_start = thread_start;
+    batch_end = thread_end;
+  } else if (thread_dim == 1) {
+    row_start = thread_start;
+    row_end = thread_end;
+  }
+
+  for (int batch = batch_start; batch < batch_end; ++batch) {
+    for (int out_y = row_start; out_y < row_end; ++out_y) {
+      const int in_y_origin = out_y * stride_height - pad_height;
+      for (int out_x = 0; out_x < output_width; ++out_x) {
+        const int in_x_origin = out_x * stride_width - pad_width;
+        for (int channel = 0; channel < output_depth; ++channel) {
+          int32_t acc = bias_data ? bias_data[channel] : 0;
+          for (int filter_y = 0; filter_y < 3; ++filter_y) {
+            const int in_y = in_y_origin + filter_y;
+            if (in_y < 0 || in_y >= input_height) {
+              continue;
+            }
+            for (int filter_x = 0; filter_x < 3; ++filter_x) {
+              const int in_x = in_x_origin + filter_x;
+              if (in_x < 0 || in_x >= input_width) {
+                continue;
+              }
+              const int32_t input_val =
+                  input_data[Offset(input_shape, batch, in_y, in_x, channel)];
+              const int32_t filter_val = filter_data[Offset(
+                  filter_shape, 0, filter_y, filter_x, channel)];
+              acc += filter_val * (input_val + input_offset);
+            }
+          }
+          acc = MultiplyByQuantizedMultiplier(acc, output_multiplier[channel],
+                                              output_shift[channel]);
+          acc += output_offset;
+          acc = std::max(acc, output_activation_min);
+          acc = std::min(acc, output_activation_max);
+          output_data[Offset(output_shape, batch, out_y, out_x, channel)] =
+              static_cast<int8_t>(acc);
+        }
+      }
+    }
+  }
+}
+
+#ifdef USE_RVV
+inline void RvvDepthwiseConv3x3FilterPerChannel(
+    const DepthwiseParams &params, const int32_t *output_multiplier,
+    const int32_t *output_shift, const RuntimeShape &input_shape,
+    const int8_t *input_data, const RuntimeShape &filter_shape,
+    const int8_t *filter_data, const RuntimeShape &bias_shape,
+    const int32_t *bias_data, const RuntimeShape &output_shape,
+    int8_t *output_data, int thread_start, int thread_end, int thread_dim) {
+  (void)bias_shape;
+  const int stride_width = params.stride_width;
+  const int stride_height = params.stride_height;
+  const int pad_width = params.padding_values.width;
+  const int pad_height = params.padding_values.height;
+  const int32_t input_offset = params.input_offset;
+  const int32_t output_offset = params.output_offset;
+  const int32_t output_activation_min = params.quantized_activation_min;
+  const int32_t output_activation_max = params.quantized_activation_max;
+  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int input_height = input_shape.Dims(1);
+  const int input_width = input_shape.Dims(2);
+  const int output_height = output_shape.Dims(1);
+  const int output_width = output_shape.Dims(2);
+  const int output_depth = output_shape.Dims(3);
+  std::vector<int32_t> acc_buffer(output_depth);
+
+  int batch_start = 0;
+  int batch_end = batches;
+  int row_start = 0;
+  int row_end = output_height;
+  if (thread_dim == 0) {
+    batch_start = thread_start;
+    batch_end = thread_end;
+  } else if (thread_dim == 1) {
+    row_start = thread_start;
+    row_end = thread_end;
+  }
+
+  for (int batch = batch_start; batch < batch_end; ++batch) {
+    for (int out_y = row_start; out_y < row_end; ++out_y) {
+      const int in_y_origin = out_y * stride_height - pad_height;
+      for (int out_x = 0; out_x < output_width; ++out_x) {
+        const int in_x_origin = out_x * stride_width - pad_width;
+        for (int channel = 0; channel < output_depth;) {
+          const size_t vl = __riscv_vsetvl_e8m1(output_depth - channel);
+          vint32m4_t acc = bias_data
+                               ? __riscv_vle32_v_i32m4(bias_data + channel, vl)
+                               : __riscv_vmv_v_x_i32m4(0, vl);
+          for (int filter_y = 0; filter_y < 3; ++filter_y) {
+            const int in_y = in_y_origin + filter_y;
+            if (in_y < 0 || in_y >= input_height) {
+              continue;
+            }
+            for (int filter_x = 0; filter_x < 3; ++filter_x) {
+              const int in_x = in_x_origin + filter_x;
+              if (in_x < 0 || in_x >= input_width) {
+                continue;
+              }
+              const int input_index =
+                  Offset(input_shape, batch, in_y, in_x, channel);
+              const int filter_index =
+                  Offset(filter_shape, 0, filter_y, filter_x, channel);
+              const vint8m1_t input_i8 =
+                  __riscv_vle8_v_i8m1(input_data + input_index, vl);
+              const vint8m1_t filter_i8 =
+                  __riscv_vle8_v_i8m1(filter_data + filter_index, vl);
+              vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
+              const vint16m2_t filter_i16 =
+                  __riscv_vsext_vf2_i16m2(filter_i8, vl);
+              input_i16 = __riscv_vadd_vx_i16m2(input_i16, input_offset, vl);
+              const vint32m4_t product =
+                  __riscv_vwmul_vv_i32m4(filter_i16, input_i16, vl);
+              acc = __riscv_vadd_vv_i32m4(acc, product, vl);
+            }
+          }
+          __riscv_vse32_v_i32m4(acc_buffer.data() + channel, acc, vl);
+          channel += vl;
+        }
+        for (int channel = 0; channel < output_depth; ++channel) {
+          int32_t acc = MultiplyByQuantizedMultiplier(
+              acc_buffer[channel], output_multiplier[channel],
+              output_shift[channel]);
+          acc += output_offset;
+          acc = std::max(acc, output_activation_min);
+          acc = std::min(acc, output_activation_max);
+          output_data[Offset(output_shape, batch, out_y, out_x, channel)] =
+              static_cast<int8_t>(acc);
+        }
+      }
+    }
+  }
+}
+#endif // USE_RVV
+
 inline void DepthwiseConvGeneral(
-    const DepthwiseParams& params, const int32_t* output_multiplier,
-    const int32_t* output_shift, const RuntimeShape& input_shape,
-    const int8_t* input_data, const RuntimeShape& filter_shape,
-    const int8_t* filter_data, const RuntimeShape& bias_shape,
-    const int32_t* bias_data, const RuntimeShape& output_shape,
-    int8_t* output_data, int thread_start, int thread_end, int thread_dim) {
+    const DepthwiseParams &params, const int32_t *output_multiplier,
+    const int32_t *output_shift, const RuntimeShape &input_shape,
+    const int8_t *input_data, const RuntimeShape &filter_shape,
+    const int8_t *filter_data, const RuntimeShape &bias_shape,
+    const int32_t *bias_data, const RuntimeShape &output_shape,
+    int8_t *output_data, int thread_start, int thread_end, int thread_dim) {
   const int stride_width = params.stride_width;
   const int stride_height = params.stride_height;
   const int pad_width = params.padding_values.width;
@@ -1688,7 +1848,7 @@ inline void DepthwiseConvGeneral(
   static const int kAccBufferMaxSize = 2048;
   int acc_buffer_size = kAccBufferMaxSize;
   int32_t stack_acc_buffer[kAccBufferMaxSize];
-  int32_t* acc_buffer = stack_acc_buffer;
+  int32_t *acc_buffer = stack_acc_buffer;
 #ifndef TF_LITE_STATIC_MEMORY
   std::unique_ptr<int32_t[]> heap_acc_buffer;
   if (kAccBufferMaxSize < output_depth) {
@@ -1711,14 +1871,14 @@ inline void DepthwiseConvGeneral(
   using row_accum_func_t = decltype(&QuantizedDepthwiseConvAccumRowGeneric);
   row_accum_func_t row_accum_func = nullptr;
 
-#define TFMINI_USE_DEPTHWISECONV_KERNEL(ALLOW_STRIDED, FIXED_INPUT_DEPTH, \
-                                        FIXED_DEPTH_MULTIPLIER)           \
-  if (!row_accum_func && (stride_width == 1 || ALLOW_STRIDED) &&          \
-      (input_depth == FIXED_INPUT_DEPTH || FIXED_INPUT_DEPTH == 0) &&     \
-      depth_multiplier == FIXED_DEPTH_MULTIPLIER) {                       \
-    row_accum_func =                                                      \
-        QuantizedDepthwiseConvAccumRow<ALLOW_STRIDED, FIXED_INPUT_DEPTH,  \
-                                       FIXED_DEPTH_MULTIPLIER>;           \
+#define TFMINI_USE_DEPTHWISECONV_KERNEL(ALLOW_STRIDED, FIXED_INPUT_DEPTH,      \
+                                        FIXED_DEPTH_MULTIPLIER)                \
+  if (!row_accum_func && (stride_width == 1 || ALLOW_STRIDED) &&               \
+      (input_depth == FIXED_INPUT_DEPTH || FIXED_INPUT_DEPTH == 0) &&          \
+      depth_multiplier == FIXED_DEPTH_MULTIPLIER) {                            \
+    row_accum_func =                                                           \
+        QuantizedDepthwiseConvAccumRow<ALLOW_STRIDED, FIXED_INPUT_DEPTH,       \
+                                       FIXED_DEPTH_MULTIPLIER>;                \
   }
 
 #ifdef USE_NEON
@@ -1757,13 +1917,13 @@ inline void DepthwiseConvGeneral(
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 1)
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 2)
   TFMINI_USE_DEPTHWISECONV_KERNEL(true, 0, 3)
-#endif  // USE_NEON
+#endif // USE_NEON
 
 #ifdef USE_RVV
   if (!row_accum_func && depth_multiplier == 1) {
     row_accum_func = QuantizedDepthwiseConvAccumRowRvvDepthMultiplier1;
   }
-#endif  // USE_RVV
+#endif // USE_RVV
 
   // No matching fast kernel found, use slow fallback.
   if (!row_accum_func) {
@@ -1784,23 +1944,23 @@ inline void DepthwiseConvGeneral(
   int output_ptr_offset = 0;
 
   switch (thread_dim) {
-    case 0:
-      TFLITE_DCHECK_GE(thread_start, 0);
-      TFLITE_DCHECK_LE(thread_end, batches);
-      batch_start = thread_start;
-      batch_end = thread_end;
-      output_ptr_offset = batch_start * FlatSizeSkipDim(output_shape, 0);
-      break;
-    case 1:
-      TFLITE_DCHECK_GE(thread_start, 0);
-      TFLITE_DCHECK_LE(thread_end, output_rows);
-      row_start = thread_start;
-      row_end = thread_end;
-      output_ptr_offset = row_start * output_width * output_depth;
-      break;
+  case 0:
+    TFLITE_DCHECK_GE(thread_start, 0);
+    TFLITE_DCHECK_LE(thread_end, batches);
+    batch_start = thread_start;
+    batch_end = thread_end;
+    output_ptr_offset = batch_start * FlatSizeSkipDim(output_shape, 0);
+    break;
+  case 1:
+    TFLITE_DCHECK_GE(thread_start, 0);
+    TFLITE_DCHECK_LE(thread_end, output_rows);
+    row_start = thread_start;
+    row_end = thread_end;
+    output_ptr_offset = row_start * output_width * output_depth;
+    break;
   }
 
-  int8_t* output_ptr = output_data + output_ptr_offset;
+  int8_t *output_ptr = output_data + output_ptr_offset;
   int batch_step =
       (output_rows + row_start - row_end) * output_width * output_depth;
   for (int b = batch_start; b < batch_end; ++b) {
@@ -1853,17 +2013,17 @@ inline void DepthwiseConvGeneral(
   }
 }
 
-}  // namespace depthwise_conv
+} // namespace depthwise_conv
 
 template <DepthwiseConvOutputRounding kOutputRounding>
 inline void DepthwiseConvWithRounding(
-    const DepthwiseParams& params, const int32_t* output_multiplier,
-    const int32_t* output_shift, const RuntimeShape& input_shape,
-    const int8_t* input_data, const RuntimeShape& filter_shape,
-    const int8_t* filter_data, const RuntimeShape& bias_shape,
-    const int32_t* bias_data, const RuntimeShape& output_shape,
-    int8_t* output_data, int thread_start, int thread_end, int thread_dim,
-    const CpuBackendContext& cpu_backend_context) {
+    const DepthwiseParams &params, const int32_t *output_multiplier,
+    const int32_t *output_shift, const RuntimeShape &input_shape,
+    const int8_t *input_data, const RuntimeShape &filter_shape,
+    const int8_t *filter_data, const RuntimeShape &bias_shape,
+    const int32_t *bias_data, const RuntimeShape &output_shape,
+    int8_t *output_data, int thread_start, int thread_end, int thread_dim,
+    const CpuBackendContext &cpu_backend_context) {
   ruy::profiler::ScopeLabel label("DepthwiseConvInt8/8bit");
   const int depth_multiplier = params.depth_multiplier;
   const int dilation_width_factor = params.dilation_width_factor;
@@ -1933,6 +2093,29 @@ inline void DepthwiseConvWithRounding(
   }
 #endif
 
+#if defined(__riscv)
+  if (depthwise_conv::RiscvDepthwiseConv3x3FilterPerChannelSupported(
+          params, input_shape, filter_shape, bias_shape, output_shape,
+          thread_dim)) {
+#ifdef USE_RVV
+    ruy::profiler::ScopeLabel specialized_label(
+        "DepthwiseConvInt8/8bit/3x3/RVV");
+    depthwise_conv::RvvDepthwiseConv3x3FilterPerChannel(
+        params, output_multiplier, output_shift, input_shape, input_data,
+        filter_shape, filter_data, bias_shape, bias_data, output_shape,
+        output_data, thread_start, thread_end, thread_dim);
+#else
+    ruy::profiler::ScopeLabel specialized_label(
+        "DepthwiseConvInt8/8bit/3x3/RiscvScalar");
+    depthwise_conv::RiscvScalarDepthwiseConv3x3FilterPerChannel(
+        params, output_multiplier, output_shift, input_shape, input_data,
+        filter_shape, filter_data, bias_shape, bias_data, output_shape,
+        output_data, thread_start, thread_end, thread_dim);
+#endif
+    return;
+  }
+#endif
+
   ruy::profiler::ScopeLabel specialized_label("DepthwiseConvInt8/8bit/General");
   depthwise_conv::DepthwiseConvGeneral(
       params, output_multiplier, output_shift, input_shape, input_data,
@@ -1940,14 +2123,15 @@ inline void DepthwiseConvWithRounding(
       output_data, thread_start, thread_end, thread_dim);
 }
 
-inline void DepthwiseConvImpl(
-    const DepthwiseParams& params, const int32_t* output_multiplier,
-    const int32_t* output_shift, const RuntimeShape& input_shape,
-    const int8_t* input_data, const RuntimeShape& filter_shape,
-    const int8_t* filter_data, const RuntimeShape& bias_shape,
-    const int32_t* bias_data, const RuntimeShape& output_shape,
-    int8_t* output_data, int thread_start, int thread_end, int thread_dim,
-    const CpuBackendContext& cpu_backend_context) {
+inline void
+DepthwiseConvImpl(const DepthwiseParams &params,
+                  const int32_t *output_multiplier, const int32_t *output_shift,
+                  const RuntimeShape &input_shape, const int8_t *input_data,
+                  const RuntimeShape &filter_shape, const int8_t *filter_data,
+                  const RuntimeShape &bias_shape, const int32_t *bias_data,
+                  const RuntimeShape &output_shape, int8_t *output_data,
+                  int thread_start, int thread_end, int thread_dim,
+                  const CpuBackendContext &cpu_backend_context) {
   return DepthwiseConvWithRounding<DepthwiseConvOutputRounding::kAwayFromZero>(
       params, output_multiplier, output_shift, input_shape, input_data,
       filter_shape, filter_data, bias_shape, bias_data, output_shape,
@@ -1956,30 +2140,23 @@ inline void DepthwiseConvImpl(
 
 template <typename T, typename TS>
 struct DepthwiseConvWorkerTask : cpu_backend_threadpool::Task {
-  DepthwiseConvWorkerTask(const DepthwiseParams& params,
-                          const int32_t* output_multiplier,
-                          const int32_t* output_shift,
-                          const RuntimeShape& input_shape, const T* input_data,
-                          const RuntimeShape& filter_shape,
-                          const T* filter_data, const RuntimeShape& bias_shape,
-                          const TS* bias_data, const RuntimeShape& output_shape,
-                          T* output_data, int thread_start, int thread_end,
+  DepthwiseConvWorkerTask(const DepthwiseParams &params,
+                          const int32_t *output_multiplier,
+                          const int32_t *output_shift,
+                          const RuntimeShape &input_shape, const T *input_data,
+                          const RuntimeShape &filter_shape,
+                          const T *filter_data, const RuntimeShape &bias_shape,
+                          const TS *bias_data, const RuntimeShape &output_shape,
+                          T *output_data, int thread_start, int thread_end,
                           int thread_dim,
-                          const CpuBackendContext& cpu_backend_context_x)
-      : params_(params),
-        output_multiplier_(output_multiplier),
-        output_shift_(output_shift),
-        input_shape_(input_shape),
-        input_data_(input_data),
-        filter_shape_(filter_shape),
-        filter_data_(filter_data),
-        bias_shape_(bias_shape),
-        bias_data_(bias_data),
-        output_shape_(output_shape),
-        output_data_(output_data),
-        thread_start_(thread_start),
-        thread_end_(thread_end),
-        thread_dim_(thread_dim),
+                          const CpuBackendContext &cpu_backend_context_x)
+      : params_(params), output_multiplier_(output_multiplier),
+        output_shift_(output_shift), input_shape_(input_shape),
+        input_data_(input_data), filter_shape_(filter_shape),
+        filter_data_(filter_data), bias_shape_(bias_shape),
+        bias_data_(bias_data), output_shape_(output_shape),
+        output_data_(output_data), thread_start_(thread_start),
+        thread_end_(thread_end), thread_dim_(thread_dim),
         cpu_backend_context(cpu_backend_context_x) {}
 
   void Run() override {
@@ -1989,26 +2166,26 @@ struct DepthwiseConvWorkerTask : cpu_backend_threadpool::Task {
                       thread_end_, thread_dim_, cpu_backend_context);
   }
 
- private:
-  const DepthwiseParams& params_;
-  const int32_t* output_multiplier_;
-  const int32_t* output_shift_;
-  const RuntimeShape& input_shape_;
-  const T* input_data_;
-  const RuntimeShape& filter_shape_;
-  const T* filter_data_;
-  const RuntimeShape& bias_shape_;
-  const TS* bias_data_;
-  const RuntimeShape& output_shape_;
-  T* output_data_;
+private:
+  const DepthwiseParams &params_;
+  const int32_t *output_multiplier_;
+  const int32_t *output_shift_;
+  const RuntimeShape &input_shape_;
+  const T *input_data_;
+  const RuntimeShape &filter_shape_;
+  const T *filter_data_;
+  const RuntimeShape &bias_shape_;
+  const TS *bias_data_;
+  const RuntimeShape &output_shape_;
+  T *output_data_;
   int thread_start_;
   int thread_end_;
   int thread_dim_;
-  const CpuBackendContext& cpu_backend_context;
+  const CpuBackendContext &cpu_backend_context;
 };
 
-inline int HowManyConvThreads(const RuntimeShape& output_shape,
-                              const RuntimeShape& filter_shape,
+inline int HowManyConvThreads(const RuntimeShape &output_shape,
+                              const RuntimeShape &filter_shape,
                               int thread_dim) {
   constexpr int kMinMulPerThread = 8;
   const int output_units = output_shape.Dims(thread_dim);
@@ -2022,12 +2199,12 @@ inline int HowManyConvThreads(const RuntimeShape& output_shape,
 }
 
 inline void DepthwiseConvPerChannel(
-    const DepthwiseParams& params, const int32_t* output_multiplier,
-    const int32_t* output_shift, const RuntimeShape& input_shape,
-    const int8_t* input_data, const RuntimeShape& filter_shape,
-    const int8_t* filter_data, const RuntimeShape& bias_shape,
-    const int32_t* bias_data, const RuntimeShape& output_shape,
-    int8_t* output_data, CpuBackendContext* cpu_backend_context) {
+    const DepthwiseParams &params, const int32_t *output_multiplier,
+    const int32_t *output_shift, const RuntimeShape &input_shape,
+    const int8_t *input_data, const RuntimeShape &filter_shape,
+    const int8_t *filter_data, const RuntimeShape &bias_shape,
+    const int32_t *bias_data, const RuntimeShape &output_shape,
+    int8_t *output_data, CpuBackendContext *cpu_backend_context) {
   ruy::profiler::ScopeLabel label("DepthwiseConvInt8");
   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
   TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
@@ -2077,7 +2254,7 @@ inline void DepthwiseConvPerChannel(
   }
 }
 
-}  // namespace optimized_integer_ops
-}  // namespace tflite
+} // namespace optimized_integer_ops
+} // namespace tflite
 
-#endif  // TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_DEPTHWISE_CONV_H_
+#endif // TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_DEPTHWISE_CONV_H_
