@@ -30,6 +30,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/integer_ops/depthwise_conv.h"
 #include "tflite/kernels/internal/optimized/integer_ops/fully_connected.h"
 #include "tflite/kernels/internal/optimized/integer_ops/leaky_relu.h"
+#include "tflite/kernels/internal/optimized/integer_ops/lut.h"
 #include "tflite/kernels/internal/optimized/integer_ops/mean.h"
 #include "tflite/kernels/internal/optimized/integer_ops/mul.h"
 #include "tflite/kernels/internal/optimized/integer_ops/pooling.h"
@@ -50,6 +51,7 @@ limitations under the License.
 #include "tflite/kernels/internal/reference/integer_ops/conv.h"
 #include "tflite/kernels/internal/reference/integer_ops/depthwise_conv.h"
 #include "tflite/kernels/internal/reference/integer_ops/fully_connected.h"
+#include "tflite/kernels/internal/reference/integer_ops/lut.h"
 #include "tflite/kernels/internal/reference/integer_ops/mul.h"
 #include "tflite/kernels/internal/reference/integer_ops/pooling.h"
 #include "tflite/kernels/internal/reference/mul.h"
@@ -927,6 +929,56 @@ TEST(RvvOpsTest, RequantizeInt32ToInt16MatchesReferenceAcrossVectorBoundaries) {
                               kInputZeroPoint, kOutputZeroPoint,
                               expected.data());
 
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, Uint8LookupTableRiscvScalarAndRvvMatchReference) {
+  std::vector<uint8_t> lut(LUTSize<uint8_t>());
+  for (int i = 0; i < static_cast<int>(lut.size()); ++i) {
+    lut[i] = static_cast<uint8_t>((i * 37 + 19) & 0xff);
+  }
+
+  for (int size : UInt8M8VectorLengths()) {
+    const std::vector<uint8_t> input = MakeUint8Input(size, 101);
+    std::vector<uint8_t> scalar(size);
+    std::vector<uint8_t> actual(size);
+    std::vector<uint8_t> expected(size);
+
+    optimized_integer_ops::RiscvScalarLookupTable(input.data(), size,
+                                                  lut.data(), scalar.data());
+    optimized_integer_ops::LookupTable(input.data(), size, lut.data(),
+                                       actual.data());
+    reference_integer_ops::LookupTable(input.data(), size, lut.data(),
+                                       expected.data());
+
+    EXPECT_THAT(scalar, ElementsAreArray(expected)) << "size=" << size;
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
+  }
+}
+
+TEST(RvvOpsTest, Int8LookupTableRiscvScalarAndRvvMatchReference) {
+  std::vector<int8_t> lut(LUTSize<int8_t>());
+  for (int i = 0; i < static_cast<int>(lut.size()); ++i) {
+    lut[i] = static_cast<int8_t>(((i * 29 + 11) & 0xff) - 128);
+  }
+
+  for (int size : UInt8M8VectorLengths()) {
+    const std::vector<int8_t> input = MakeInt8Input(size, 101);
+    std::vector<int8_t> scalar(size);
+    std::vector<int8_t> actual(size);
+    std::vector<int8_t> expected(size);
+
+    optimized_integer_ops::RiscvScalarLookupTable(
+        reinterpret_cast<const uint8_t *>(input.data()), size,
+        reinterpret_cast<const uint8_t *>(lut.data()),
+        reinterpret_cast<uint8_t *>(scalar.data()));
+    optimized_integer_ops::LookupTable(input.data(), size, lut.data(),
+                                       actual.data());
+    reference_integer_ops::LookupTable(input.data(), size, lut.data(),
+                                       expected.data());
+
+    EXPECT_THAT(scalar, ElementsAreArray(expected)) << "size=" << size;
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
   }
 }

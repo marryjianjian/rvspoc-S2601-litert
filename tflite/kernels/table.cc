@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 #include "tflite/core/c/common.h"
 #include "tflite/kernels/internal/common.h"
+#include "tflite/kernels/internal/optimized/integer_ops/lut.h"
 #include "tflite/kernels/internal/reference/integer_ops/lut.h"
 #include "tflite/kernels/internal/tensor.h"
 #include "tflite/kernels/kernel_util.h"
@@ -27,15 +28,15 @@ constexpr int kInputTensor = 0;
 constexpr int kTable = 1;
 constexpr int kOutputTensor = 0;
 
-TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
+TfLiteStatus Prepare(TfLiteContext *context, TfLiteNode *node) {
   TF_LITE_ENSURE_EQ(context, NumInputs(node), 2);
   TF_LITE_ENSURE_EQ(context, NumOutputs(node), 1);
 
-  const TfLiteTensor* input;
+  const TfLiteTensor *input;
   TF_LITE_ENSURE_OK(context, GetInputSafe(context, node, kInputTensor, &input));
-  const TfLiteTensor* table;
+  const TfLiteTensor *table;
   TF_LITE_ENSURE_OK(context, GetInputSafe(context, node, kTable, &table));
-  TfLiteTensor* output;
+  TfLiteTensor *output;
   TF_LITE_ENSURE_OK(context,
                     GetOutputSafe(context, node, kOutputTensor, &output));
 
@@ -61,42 +62,42 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
                                TfLiteIntArrayCopy(input->dims));
 }
 
-TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
-  const TfLiteTensor* input;
+TfLiteStatus Eval(TfLiteContext *context, TfLiteNode *node) {
+  const TfLiteTensor *input;
   TF_LITE_ENSURE_OK(context, GetInputSafe(context, node, kInputTensor, &input));
-  const TfLiteTensor* table;
+  const TfLiteTensor *table;
   TF_LITE_ENSURE_OK(context, GetInputSafe(context, node, kTable, &table));
-  TfLiteTensor* output;
+  TfLiteTensor *output;
   TF_LITE_ENSURE_OK(context,
                     GetOutputSafe(context, node, kOutputTensor, &output));
 
   switch (input->type) {
-    case kTfLiteInt8:
-      reference_integer_ops::LookupTable(
-          GetTensorData<int8_t>(input),
-          MatchingFlatSize(GetTensorShape(input), GetTensorShape(output)),
-          GetTensorData<int8_t>(table), GetTensorData<int8_t>(output));
-      return kTfLiteOk;
-    case kTfLiteInt16:
-      reference_integer_ops::LookupTable(
-          GetTensorData<int16_t>(input),
-          MatchingFlatSize(GetTensorShape(input), GetTensorShape(output)),
-          GetTensorData<int16_t>(table), GetTensorData<int16_t>(output));
-      return kTfLiteOk;
-    default:
-      TF_LITE_UNSUPPORTED_TYPE(context, input->type, "Table");
+  case kTfLiteInt8:
+    optimized_integer_ops::LookupTable(
+        GetTensorData<int8_t>(input),
+        MatchingFlatSize(GetTensorShape(input), GetTensorShape(output)),
+        GetTensorData<int8_t>(table), GetTensorData<int8_t>(output));
+    return kTfLiteOk;
+  case kTfLiteInt16:
+    reference_integer_ops::LookupTable(
+        GetTensorData<int16_t>(input),
+        MatchingFlatSize(GetTensorShape(input), GetTensorShape(output)),
+        GetTensorData<int16_t>(table), GetTensorData<int16_t>(output));
+    return kTfLiteOk;
+  default:
+    TF_LITE_UNSUPPORTED_TYPE(context, input->type, "Table");
   }
 
   return kTfLiteOk;
 }
 
-}  // namespace table
+} // namespace table
 
-TfLiteRegistration* Register_TABLE() {
+TfLiteRegistration *Register_TABLE() {
   static TfLiteRegistration r = {nullptr, nullptr, table::Prepare, table::Eval};
   return &r;
 }
 
-}  // namespace custom
-}  // namespace ops
-}  // namespace tflite
+} // namespace custom
+} // namespace ops
+} // namespace tflite

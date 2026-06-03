@@ -22,12 +22,33 @@ limitations under the License.
 #endif
 
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 
 namespace tflite {
 namespace optimized_integer_ops {
 
-inline void LookupTable(const uint8_t* input_data, int num_elements,
-                        const uint8_t* lut, uint8_t* output_data) {
+inline void RiscvScalarLookupTable(const uint8_t *input_data, int num_elements,
+                                   const uint8_t *lut, uint8_t *output_data) {
+  for (int i = 0; i < num_elements; ++i) {
+    output_data[i] = lut[input_data[i]];
+  }
+}
+
+#if defined(USE_RVV)
+inline void RvvLookupTable(const uint8_t *input_data, int num_elements,
+                           const uint8_t *lut, uint8_t *output_data) {
+  for (int i = 0; i < num_elements;) {
+    const size_t vl = __riscv_vsetvl_e8m8(num_elements - i);
+    const vuint8m8_t index = __riscv_vle8_v_u8m8(input_data + i, vl);
+    const vuint8m8_t output = __riscv_vluxei8_v_u8m8(lut, index, vl);
+    __riscv_vse8_v_u8m8(output_data + i, output, vl);
+    i += vl;
+  }
+}
+#endif // USE_RVV
+
+inline void LookupTable(const uint8_t *input_data, int num_elements,
+                        const uint8_t *lut, uint8_t *output_data) {
   int i = 0;
 #if __aarch64__ && __clang__
   // This code uses ARM64-only instructions.
@@ -51,22 +72,25 @@ inline void LookupTable(const uint8_t* input_data, int num_elements,
   }
   // Postamble and non-ARM64 code: simple for loop.
 #endif
-  for (; i < num_elements; ++i) {
-    output_data[i] = lut[input_data[i]];
-  }
+#if defined(USE_RVV)
+  RvvLookupTable(input_data + i, num_elements - i, lut, output_data + i);
+#else
+  RiscvScalarLookupTable(input_data + i, num_elements - i, lut,
+                         output_data + i);
+#endif
 }
 
 // LUTPopulate<int8_t> has ordered the LUT so that indexing it with an
 // int8_t is just done by casting it to an uint8_t. We can thus reuse the uint8
 // LookupTable function.
-inline void LookupTable(const int8_t* input_data, int num_elements,
-                        const int8_t* lut, int8_t* output_data) {
-  LookupTable(reinterpret_cast<const uint8_t*>(input_data), num_elements,
-              reinterpret_cast<const uint8_t*>(lut),
-              reinterpret_cast<uint8_t*>(output_data));
+inline void LookupTable(const int8_t *input_data, int num_elements,
+                        const int8_t *lut, int8_t *output_data) {
+  LookupTable(reinterpret_cast<const uint8_t *>(input_data), num_elements,
+              reinterpret_cast<const uint8_t *>(lut),
+              reinterpret_cast<uint8_t *>(output_data));
 }
 
-}  // namespace optimized_integer_ops
-}  // namespace tflite
+} // namespace optimized_integer_ops
+} // namespace tflite
 
-#endif  // TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_LUT_H_
+#endif // TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_LUT_H_
