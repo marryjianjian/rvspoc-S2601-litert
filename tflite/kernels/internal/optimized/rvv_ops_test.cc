@@ -30,6 +30,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/integer_ops/depthwise_conv.h"
 #include "tflite/kernels/internal/optimized/integer_ops/fully_connected.h"
 #include "tflite/kernels/internal/optimized/integer_ops/leaky_relu.h"
+#include "tflite/kernels/internal/optimized/integer_ops/mean.h"
 #include "tflite/kernels/internal/optimized/integer_ops/mul.h"
 #include "tflite/kernels/internal/optimized/integer_ops/pooling.h"
 #include "tflite/kernels/internal/optimized/integer_ops/sub.h"
@@ -292,6 +293,49 @@ std::vector<int16_t> MakeInt16Input(int size, int offset) {
     values[i] = static_cast<int16_t>(((i * 2053 + offset) % 65535) - 32767);
   }
   return values;
+}
+
+template <typename T>
+void ReferenceOptimizedMeanHwScalar(const MeanParams &params,
+                                    const RuntimeShape &input_shape,
+                                    const T *input_data,
+                                    int32_t input_zero_point, float input_scale,
+                                    const RuntimeShape &output_shape,
+                                    T *output_data, int32_t output_zero_point,
+                                    float output_scale) {
+  const int input_height = input_shape.Dims(1);
+  const int input_width = input_shape.Dims(2);
+  const float num_elements_in_axis = input_width * input_height;
+  float temp = input_zero_point * input_scale / output_scale;
+  temp = temp > 0 ? temp + 0.5f : temp - 0.5f;
+  const int32_t bias = output_zero_point - static_cast<int32_t>(temp);
+  const float real_scale = input_scale / (num_elements_in_axis * output_scale);
+  int32_t multiplier;
+  int shift;
+  QuantizeMultiplier(real_scale, &multiplier, &shift);
+
+  const int32_t kMinValue = std::numeric_limits<T>::min();
+  const int32_t kMaxValue = std::numeric_limits<T>::max();
+  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int output_depth = output_shape.Dims(3);
+  ASSERT_EQ(params.axis_count, 2);
+  ASSERT_TRUE((params.axis[0] == 1 && params.axis[1] == 2) ||
+              (params.axis[0] == 2 && params.axis[1] == 1));
+  for (int out_b = 0; out_b < batches; ++out_b) {
+    for (int out_d = 0; out_d < output_depth; ++out_d) {
+      int32_t acc = 0;
+      for (int in_h = 0; in_h < input_height; ++in_h) {
+        for (int in_w = 0; in_w < input_width; ++in_w) {
+          acc += input_data[Offset(input_shape, out_b, in_h, in_w, out_d)];
+        }
+      }
+      acc = MultiplyByQuantizedMultiplier(acc, multiplier, shift);
+      acc += bias;
+      acc = std::min(std::max(acc, kMinValue), kMaxValue);
+      output_data[Offset(output_shape, out_b, 0, 0, out_d)] =
+          static_cast<T>(acc);
+    }
+  }
 }
 
 template <typename LhsScalar, typename RhsScalar, typename DstScalar,
@@ -1872,6 +1916,90 @@ TEST(RvvOpsTest, FloatMeanLastAxisMatchesReferenceAcrossVectorBoundaries) {
 
     SCOPED_TRACE(::testing::Message() << "axis_size=" << axis_size);
     ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
+  }
+}
+
+TEST(RvvOpsTest, Uint8MeanHwMatchesScalarAcrossVectorBoundaries) {
+  constexpr int kBatches = 1;
+  constexpr int kInputHeight = 3;
+  constexpr int kInputWidth = 5;
+  constexpr int kOutputHeight = 1;
+  constexpr int kOutputWidth = 1;
+  constexpr int kInputZeroPoint = 0;
+  constexpr int kOutputZeroPoint = 0;
+  constexpr float kInputScale = 0.03125f;
+  constexpr float kOutputScale = 0.03125f;
+  const int axis[] = {1, 2};
+  MeanParams params;
+  params.axis_count = 2;
+  params.axis[0] = axis[0];
+  params.axis[1] = axis[1];
+  CpuBackendContext cpu_backend_context;
+  cpu_backend_context.SetMaxNumThreads(1);
+
+  for (int depth : Int8M1VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape(
+        {kBatches, kInputHeight, kInputWidth, depth});
+    const RuntimeShape output_shape(
+        {kBatches, kOutputHeight, kOutputWidth, depth});
+    const std::vector<uint8_t> input =
+        MakeUint8Input(input_shape.FlatSize(), 71);
+    std::vector<uint8_t> actual(output_shape.FlatSize());
+    std::vector<uint8_t> expected(output_shape.FlatSize());
+
+    optimized_ops::Mean(params, input_shape, input.data(), kInputZeroPoint,
+                        kInputScale, output_shape, actual.data(),
+                        kOutputZeroPoint, kOutputScale, &cpu_backend_context);
+    ReferenceOptimizedMeanHwScalar(
+        params, input_shape, input.data(), kInputZeroPoint, kInputScale,
+        output_shape, expected.data(), kOutputZeroPoint, kOutputScale);
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
+  }
+}
+
+TEST(RvvOpsTest, Int8MeanHwMatchesScalarAcrossVectorBoundaries) {
+  constexpr int kBatches = 1;
+  constexpr int kInputHeight = 3;
+  constexpr int kInputWidth = 5;
+  constexpr int kOutputHeight = 1;
+  constexpr int kOutputWidth = 1;
+  constexpr int kInputZeroPoint = 0;
+  constexpr int kOutputZeroPoint = 0;
+  constexpr float kInputScale = 0.03125f;
+  constexpr float kOutputScale = 0.03125f;
+  const int axis[] = {1, 2};
+  MeanParams params;
+  params.axis_count = 2;
+  params.axis[0] = axis[0];
+  params.axis[1] = axis[1];
+  CpuBackendContext cpu_backend_context;
+  cpu_backend_context.SetMaxNumThreads(1);
+
+  for (int depth : Int8M1VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape(
+        {kBatches, kInputHeight, kInputWidth, depth});
+    const RuntimeShape output_shape(
+        {kBatches, kOutputHeight, kOutputWidth, depth});
+    const std::vector<int8_t> input = MakeInt8Input(input_shape.FlatSize(), 71);
+    std::vector<int8_t> actual(output_shape.FlatSize());
+    std::vector<int8_t> expected(output_shape.FlatSize());
+
+    optimized_integer_ops::Mean(params, input_shape, input.data(),
+                                kInputZeroPoint, kInputScale, output_shape,
+                                actual.data(), kOutputZeroPoint, kOutputScale,
+                                &cpu_backend_context);
+    ReferenceOptimizedMeanHwScalar(
+        params, input_shape, input.data(), kInputZeroPoint, kInputScale,
+        output_shape, expected.data(), kOutputZeroPoint, kOutputScale);
+
+    EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
   }
 }
 

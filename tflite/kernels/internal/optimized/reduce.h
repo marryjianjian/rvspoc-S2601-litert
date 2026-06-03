@@ -22,7 +22,7 @@ limitations under the License.
 #include <type_traits>
 #include <vector>
 
-#include "ruy/profiler/instrumentation.h"  // from @ruy
+#include "ruy/profiler/instrumentation.h" // from @ruy
 #include "tflite/kernels/cpu_backend_threadpool.h"
 #include "tflite/kernels/internal/optimized/optimized_ops_utils.h"
 #include "tflite/kernels/internal/optimized/reduce_utils.h"
@@ -38,10 +38,10 @@ namespace optimized_ops {
 
 using ops::builtin::reduce::ReduceType;
 
-inline void MeanImpl(const tflite::MeanParams& op_params,
-                     const RuntimeShape& input_shape, const uint8_t* input_data,
+inline void MeanImpl(const tflite::MeanParams &op_params,
+                     const RuntimeShape &input_shape, const uint8_t *input_data,
                      int32 multiplier, int32 shift, int32 bias,
-                     const RuntimeShape& output_shape, uint8_t* output_data,
+                     const RuntimeShape &output_shape, uint8_t *output_data,
                      int start_depth, int end_depth) {
   ruy::profiler::ScopeLabel label("Mean4D/Uint8/MeanImpl");
 
@@ -66,7 +66,7 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
   const int32x4_t bias_dup = vdupq_n_s32(bias);
   const int32x4_t min_dup = vdupq_n_s32(kMinValue);
   const int32x4_t max_dup = vdupq_n_s32(kMaxValue);
-#endif  // USE_NEON
+#endif // USE_NEON
 
   for (int out_b = 0; out_b < output_batch; ++out_b) {
     int out_d = start_depth;
@@ -80,7 +80,7 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
       temp_sum.val[3] = vdupq_n_s32(0);
       for (int in_h = 0; in_h < input_height; ++in_h) {
         for (int in_w = 0; in_w < input_width; ++in_w) {
-          const uint8_t* input_data_ptr =
+          const uint8_t *input_data_ptr =
               input_data + Offset(input_shape, out_b, in_h, in_w, out_d);
           uint8x16_t input_data_val = vld1q_u8(input_data_ptr);
 
@@ -137,11 +137,43 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
 
       uint8x16_t combined_output = vcombine_u8(narrowed_low, narrowed_high);
 
-      uint8_t* output_data_ptr =
+      uint8_t *output_data_ptr =
           output_data + Offset(output_shape, out_b, 0, 0, out_d);
       vst1q_u8(output_data_ptr, combined_output);
     }
-#endif  // USE_NEON
+#endif // USE_NEON
+
+#if defined(USE_RVV)
+    std::vector<int32_t> rvv_output(end_depth - start_depth);
+    for (; out_d < end_depth;) {
+      const size_t vl = __riscv_vsetvl_e8m1(end_depth - out_d);
+      vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, vl);
+      for (int in_h = 0; in_h < input_height; ++in_h) {
+        for (int in_w = 0; in_w < input_width; ++in_w) {
+          const uint8_t *input_data_ptr =
+              input_data + Offset(input_shape, out_b, in_h, in_w, out_d);
+          const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input_data_ptr, vl);
+          const vint32m4_t input_i32 =
+              __riscv_vreinterpret_v_u32m4_i32m4(__riscv_vzext_vf2_u32m4(
+                  __riscv_vzext_vf2_u16m2(input_u8, vl), vl));
+          acc = __riscv_vadd_vv_i32m4(acc, input_i32, vl);
+        }
+      }
+
+      int32_t *rvv_output_ptr = rvv_output.data() + out_d - start_depth;
+      __riscv_vse32_v_i32m4(rvv_output_ptr, acc, vl);
+      uint8_t *output_data_ptr =
+          output_data + Offset(output_shape, out_b, 0, 0, out_d);
+      for (size_t i = 0; i < vl; ++i) {
+        int32_t quantized =
+            MultiplyByQuantizedMultiplier(rvv_output_ptr[i], multiplier, shift);
+        quantized += bias;
+        quantized = std::min(std::max(quantized, kMinValue), kMaxValue);
+        output_data_ptr[i] = static_cast<uint8_t>(quantized);
+      }
+      out_d += vl;
+    }
+#endif // defined(USE_RVV)
 
     for (; out_d < end_depth; ++out_d) {
       int acc = 0;
@@ -161,46 +193,40 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
 }
 
 struct MeanWorkerTask : cpu_backend_threadpool::Task {
-  MeanWorkerTask(const tflite::MeanParams& op_params,
-                 const RuntimeShape& input_shape, const uint8_t* input_data,
+  MeanWorkerTask(const tflite::MeanParams &op_params,
+                 const RuntimeShape &input_shape, const uint8_t *input_data,
                  int32 multiplier, int32 shift, int32 bias,
-                 const RuntimeShape& output_shape, uint8_t* output_data,
+                 const RuntimeShape &output_shape, uint8_t *output_data,
                  int start_height, int end_height)
-      : op_params(op_params),
-        input_shape(input_shape),
-        input_data(input_data),
-        multiplier(multiplier),
-        shift(shift),
-        bias(bias),
-        output_shape(output_shape),
-        output_data(output_data),
-        start_height(start_height),
-        end_height(end_height) {}
+      : op_params(op_params), input_shape(input_shape), input_data(input_data),
+        multiplier(multiplier), shift(shift), bias(bias),
+        output_shape(output_shape), output_data(output_data),
+        start_height(start_height), end_height(end_height) {}
 
   void Run() override {
     MeanImpl(op_params, input_shape, input_data, multiplier, shift, bias,
              output_shape, output_data, start_height, end_height);
   }
 
- private:
-  const tflite::MeanParams& op_params;
-  const RuntimeShape& input_shape;
-  const uint8_t* input_data;
+private:
+  const tflite::MeanParams &op_params;
+  const RuntimeShape &input_shape;
+  const uint8_t *input_data;
   int32 multiplier;
   int32 shift;
   int32 bias;
-  const RuntimeShape& output_shape;
-  uint8_t* output_data;
+  const RuntimeShape &output_shape;
+  uint8_t *output_data;
   int start_height;
   int end_height;
 };
 
-inline void Mean(const tflite::MeanParams& op_params,
-                 const RuntimeShape& unextended_input_shape,
-                 const uint8_t* input_data, int32 input_zero_point,
-                 float input_scale, const RuntimeShape& unextended_output_shape,
-                 uint8_t* output_data, int32 output_zero_point,
-                 float output_scale, CpuBackendContext* cpu_backend_context) {
+inline void Mean(const tflite::MeanParams &op_params,
+                 const RuntimeShape &unextended_input_shape,
+                 const uint8_t *input_data, int32 input_zero_point,
+                 float input_scale, const RuntimeShape &unextended_output_shape,
+                 uint8_t *output_data, int32 output_zero_point,
+                 float output_scale, CpuBackendContext *cpu_backend_context) {
   ruy::profiler::ScopeLabel label("Mean4D/Uint8");
   // Current implementation only supports dimension equals 4 and simultaneous
   // reduction over width and height.
@@ -263,40 +289,35 @@ inline void Mean(const tflite::MeanParams& op_params,
   }
 }
 
-template <typename T>
-struct SumOp {
-  inline T operator()(const T& a) const { return a; }
-  inline T operator()(const T& a, const T& b) const { return a + b; }
+template <typename T> struct SumOp {
+  inline T operator()(const T &a) const { return a; }
+  inline T operator()(const T &a, const T &b) const { return a + b; }
   static constexpr T kNeutralElement = T(0);
 };
 
-template <typename T, typename U>
-struct CastSumOp {
-  inline U operator()(const T& a) const { return static_cast<U>(a); }
-  inline U operator()(const U& a, const T& b) const {
+template <typename T, typename U> struct CastSumOp {
+  inline U operator()(const T &a) const { return static_cast<U>(a); }
+  inline U operator()(const U &a, const T &b) const {
     return a + static_cast<U>(b);
   }
   static constexpr U kNeutralElement = U(0);
 };
 
-template <typename T>
-struct ProdOp {
-  inline T operator()(const T& a) const { return a; }
-  inline T operator()(const T& a, const T& b) const { return a * b; }
+template <typename T> struct ProdOp {
+  inline T operator()(const T &a) const { return a; }
+  inline T operator()(const T &a, const T &b) const { return a * b; }
   static constexpr T kNeutralElement = T(1);
 };
 
-template <typename T>
-struct MaxOp {
-  inline T operator()(const T& a) const { return a; }
-  inline T operator()(const T& a, const T& b) const { return (a > b) ? a : b; }
+template <typename T> struct MaxOp {
+  inline T operator()(const T &a) const { return a; }
+  inline T operator()(const T &a, const T &b) const { return (a > b) ? a : b; }
   static constexpr T kNeutralElement = std::numeric_limits<T>::lowest();
 };
 
-template <typename T>
-struct MinOp {
-  inline T operator()(const T& a) const { return a; }
-  inline T operator()(const T& a, const T& b) const { return (a < b) ? a : b; }
+template <typename T> struct MinOp {
+  inline T operator()(const T &a) const { return a; }
+  inline T operator()(const T &a, const T &b) const { return (a < b) ? a : b; }
   static constexpr T kNeutralElement = std::numeric_limits<T>::max();
 };
 
@@ -313,40 +334,39 @@ struct OrOp {
 };
 
 #if defined(USE_RVV)
-inline float RvvReduceLastAxisFloat(const float* input_data, int axis_size,
+inline float RvvReduceLastAxisFloat(const float *input_data, int axis_size,
                                     ReduceType reduce_type) {
   float result;
   switch (reduce_type) {
-    case ReduceType::kSum:
-      result = 0.0f;
-      break;
-    case ReduceType::kMax:
-      result = std::numeric_limits<float>::lowest();
-      break;
-    case ReduceType::kMin:
-      result = std::numeric_limits<float>::max();
-      break;
-    default:
-      return 0.0f;
+  case ReduceType::kSum:
+    result = 0.0f;
+    break;
+  case ReduceType::kMax:
+    result = std::numeric_limits<float>::lowest();
+    break;
+  case ReduceType::kMin:
+    result = std::numeric_limits<float>::max();
+    break;
+  default:
+    return 0.0f;
   }
 
   for (int i = 0; i < axis_size;) {
     const size_t vl = __riscv_vsetvl_e32m4(axis_size - i);
-    const vfloat32m4_t input =
-        __riscv_vle32_v_f32m4(input_data + i, vl);
+    const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
     vfloat32m1_t scalar = __riscv_vfmv_v_f_f32m1(result, 1);
     switch (reduce_type) {
-      case ReduceType::kSum:
-        scalar = __riscv_vfredusum_vs_f32m4_f32m1(input, scalar, vl);
-        break;
-      case ReduceType::kMax:
-        scalar = __riscv_vfredmax_vs_f32m4_f32m1(input, scalar, vl);
-        break;
-      case ReduceType::kMin:
-        scalar = __riscv_vfredmin_vs_f32m4_f32m1(input, scalar, vl);
-        break;
-      default:
-        break;
+    case ReduceType::kSum:
+      scalar = __riscv_vfredusum_vs_f32m4_f32m1(input, scalar, vl);
+      break;
+    case ReduceType::kMax:
+      scalar = __riscv_vfredmax_vs_f32m4_f32m1(input, scalar, vl);
+      break;
+    case ReduceType::kMin:
+      scalar = __riscv_vfredmin_vs_f32m4_f32m1(input, scalar, vl);
+      break;
+    default:
+      break;
     }
     result = __riscv_vfmv_f_s_f32m1_f32(scalar);
     i += vl;
@@ -354,11 +374,11 @@ inline float RvvReduceLastAxisFloat(const float* input_data, int axis_size,
   return result;
 }
 
-inline bool RvvReduceLastAxisFloat(const float* input_data,
-                                   const int* normalized_dims,
+inline bool RvvReduceLastAxisFloat(const float *input_data,
+                                   const int *normalized_dims,
                                    int normalized_num_dims,
-                                   const int* resolved_axis,
-                                   int num_resolved_axis, float* output_data,
+                                   const int *resolved_axis,
+                                   int num_resolved_axis, float *output_data,
                                    ReduceType reduce_type) {
   if (normalized_num_dims <= 1 || num_resolved_axis != 1 ||
       resolved_axis[0] != normalized_num_dims - 1 ||
@@ -373,17 +393,17 @@ inline bool RvvReduceLastAxisFloat(const float* input_data,
   }
   const int axis_size = normalized_dims[normalized_num_dims - 1];
   for (int outer = 0; outer < output_size; ++outer) {
-    output_data[outer] = RvvReduceLastAxisFloat(
-        input_data + outer * axis_size, axis_size, reduce_type);
+    output_data[outer] = RvvReduceLastAxisFloat(input_data + outer * axis_size,
+                                                axis_size, reduce_type);
   }
   return true;
 }
-#endif  // USE_RVV
+#endif // USE_RVV
 
 // When the number of axis is zero, the reduction is simply a copy.
 template <typename T>
-void ReduceIsCopy(const T* input_data, const int* input_dims,
-                  const int input_num_dims, T* output_data) {
+void ReduceIsCopy(const T *input_data, const int *input_dims,
+                  const int input_num_dims, T *output_data) {
   int num_elems = NumElements(input_dims, input_num_dims);
   memcpy(output_data, input_data, num_elems * sizeof(T));
 }
@@ -397,16 +417,15 @@ void ReduceIsCopy(const T* input_data, const int* input_dims,
 // ReducerNext is applied to each subsequent element to be written to each
 // output position.
 template <typename T, typename U, typename ReducerFirst, typename ReducerNext>
-inline std::pair<const T*, U*> ReduceImpl(const T* input_data,
-                                          const int* input_dims, U* output_data,
-                                          int depth, int parity, bool next,
-                                          const ReducerFirst& reducer_first,
-                                          const ReducerNext& reducer_next) {
+inline std::pair<const T *, U *>
+ReduceImpl(const T *input_data, const int *input_dims, U *output_data,
+           int depth, int parity, bool next, const ReducerFirst &reducer_first,
+           const ReducerNext &reducer_next) {
   // The output pointer is incremented conditionally depending on whether the
   // odd or even dimension is being reduced.
   // The input pointer is always incremented as each input is read once.
   if (depth > 0) {
-    U* future_output = output_data;
+    U *future_output = output_data;
     bool update_output = (depth % 2) == parity;
     for (int i = 0; i < input_dims[0]; ++i) {
       if (i > 0 && !update_output) {
@@ -457,11 +476,10 @@ inline std::pair<const T*, U*> ReduceImpl(const T* input_data,
 // element is written and ReducerNext is used for all subsequent writes.
 template <typename In, typename Out, typename ReducerFirst,
           typename ReducerNext>
-inline bool Reduce(const In* input_data, const int* input_dims,
-                   const int input_num_dims, const int* axis,
-                   const int num_axis, Out* output_data,
-                   const ReducerFirst& reducer_first,
-                   const ReducerNext& reducer_next) {
+inline bool
+Reduce(const In *input_data, const int *input_dims, const int input_num_dims,
+       const int *axis, const int num_axis, Out *output_data,
+       const ReducerFirst &reducer_first, const ReducerNext &reducer_next) {
   const int parity = (axis[num_axis - 1] == input_num_dims - 1) ? 1 : 0;
   ReduceImpl(input_data, input_dims, output_data, input_num_dims - 1, parity,
              /*next=*/false, reducer_first, reducer_next);
@@ -472,14 +490,14 @@ inline bool Reduce(const In* input_data, const int* input_dims,
 // It does so in two stages, first calculates the sum of elements along the axis
 // then divides it by the number of element in axis for quantized values.
 template <typename T, typename U>
-bool QuantizedMeanOrSum(const T* input_data, int32_t input_zero_point,
-                        float input_scale, const int* input_dims,
-                        const int input_num_dims, T* output_data,
+bool QuantizedMeanOrSum(const T *input_data, int32_t input_zero_point,
+                        float input_scale, const int *input_dims,
+                        const int input_num_dims, T *output_data,
                         int32_t output_zero_point, float output_scale,
-                        const int* output_dims, const int output_num_dims,
-                        const int* axis, const int num_axis_dimensions,
-                        bool keep_dims, int* normalized_dims,
-                        int* resolved_axis, U* temp_sum, bool compute_sum) {
+                        const int *output_dims, const int output_num_dims,
+                        const int *axis, const int num_axis_dimensions,
+                        bool keep_dims, int *normalized_dims,
+                        int *resolved_axis, U *temp_sum, bool compute_sum) {
   const int32_t kMinValue = std::numeric_limits<T>::min();
   const int32_t kMaxValue = std::numeric_limits<T>::max();
   ruy::profiler::ScopeLabel label(compute_sum ? "QuantizedSum"
@@ -500,7 +518,8 @@ bool QuantizedMeanOrSum(const T* input_data, int32_t input_zero_point,
   // empty but output tensor is not. In that case, output tensor should be
   // filled with init_value.
   for (int i = 0; i < input_num_dims; ++i) {
-    if (input_dims[i] == 0) return true;
+    if (input_dims[i] == 0)
+      return true;
   }
 
   // Resolve axis.
@@ -565,27 +584,27 @@ bool QuantizedMeanOrSum(const T* input_data, int32_t input_zero_point,
 }
 
 template <typename T>
-inline bool ReduceDispatcher(const T* input_data, const int* input_dims,
-                             const int input_num_dims, const int* output_dims,
-                             int output_num_dims, T* output_data,
-                             const int* axis, const int64_t num_axis_dimensions,
+inline bool ReduceDispatcher(const T *input_data, const int *input_dims,
+                             const int input_num_dims, const int *output_dims,
+                             int output_num_dims, T *output_data,
+                             const int *axis, const int64_t num_axis_dimensions,
                              ReduceType reduce_type) {
   T init_value;
   switch (reduce_type) {
-    case ReduceType::kProd:
-      init_value = ProdOp<T>::kNeutralElement;
-      break;
-    case ReduceType::kSum:
-      init_value = SumOp<T>::kNeutralElement;
-      break;
-    case ReduceType::kMin:
-      init_value = MinOp<T>::kNeutralElement;
-      break;
-    case ReduceType::kMax:
-      init_value = MaxOp<T>::kNeutralElement;
-      break;
-    default:
-      return false;
+  case ReduceType::kProd:
+    init_value = ProdOp<T>::kNeutralElement;
+    break;
+  case ReduceType::kSum:
+    init_value = SumOp<T>::kNeutralElement;
+    break;
+  case ReduceType::kMin:
+    init_value = MinOp<T>::kNeutralElement;
+    break;
+  case ReduceType::kMax:
+    init_value = MaxOp<T>::kNeutralElement;
+    break;
+  default:
+    return false;
   }
   // Return early when input shape has zero dim. This is done after initializing
   // data for output tensor because there are cases that the input tensor is
@@ -599,45 +618,44 @@ inline bool ReduceDispatcher(const T* input_data, const int* input_dims,
   }
 
   switch (reduce_type) {
-    case ReduceType::kProd:
-      return Reduce<T, T, ProdOp<T>, ProdOp<T>>(
-          input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
-          output_data, ProdOp<T>(), ProdOp<T>());
-    case ReduceType::kSum:
-      return Reduce<T, T, SumOp<T>, SumOp<T>>(
-          input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
-          output_data, SumOp<T>(), SumOp<T>());
-    case ReduceType::kMin:
-      return Reduce<T, T, MinOp<T>, MinOp<T>>(
-          input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
-          output_data, MinOp<T>(), MinOp<T>());
-    case ReduceType::kMax:
-      return Reduce<T, T, MaxOp<T>, MaxOp<T>>(
-          input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
-          output_data, MaxOp<T>(), MaxOp<T>());
-    default:
-      return false;
+  case ReduceType::kProd:
+    return Reduce<T, T, ProdOp<T>, ProdOp<T>>(
+        input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
+        output_data, ProdOp<T>(), ProdOp<T>());
+  case ReduceType::kSum:
+    return Reduce<T, T, SumOp<T>, SumOp<T>>(
+        input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
+        output_data, SumOp<T>(), SumOp<T>());
+  case ReduceType::kMin:
+    return Reduce<T, T, MinOp<T>, MinOp<T>>(
+        input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
+        output_data, MinOp<T>(), MinOp<T>());
+  case ReduceType::kMax:
+    return Reduce<T, T, MaxOp<T>, MaxOp<T>>(
+        input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
+        output_data, MaxOp<T>(), MaxOp<T>());
+  default:
+    return false;
   }
 }
 
 template <>
-inline bool ReduceDispatcher<bool>(const bool* input_data,
-                                   const int* input_dims,
-                                   const int input_num_dims,
-                                   const int* output_dims, int output_num_dims,
-                                   bool* output_data, const int* axis,
-                                   const int64_t num_axis_dimensions,
-                                   ReduceType reduce_type) {
+inline bool
+ReduceDispatcher<bool>(const bool *input_data, const int *input_dims,
+                       const int input_num_dims, const int *output_dims,
+                       int output_num_dims, bool *output_data, const int *axis,
+                       const int64_t num_axis_dimensions,
+                       ReduceType reduce_type) {
   bool init_value;
   switch (reduce_type) {
-    case ReduceType::kAny:
-      init_value = OrOp::kNeutralElement;
-      break;
-    case ReduceType::kAll:
-      init_value = AndOp::kNeutralElement;
-      break;
-    default:
-      return false;
+  case ReduceType::kAny:
+    init_value = OrOp::kNeutralElement;
+    break;
+  case ReduceType::kAll:
+    init_value = AndOp::kNeutralElement;
+    break;
+  default:
+    return false;
   }
   // Return early when input shape has zero dim. This is done after initializing
   // data for output tensor because there are cases that the input tensor is
@@ -650,31 +668,29 @@ inline bool ReduceDispatcher<bool>(const bool* input_data,
     }
   }
   switch (reduce_type) {
-    case ReduceType::kAll:
-      return Reduce<bool, bool, AndOp, AndOp>(
-          input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
-          output_data, AndOp(), AndOp());
-    case ReduceType::kAny:
-      return Reduce<bool, bool, OrOp, OrOp>(
-          input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
-          output_data, OrOp(), OrOp());
-    default:
-      return false;
+  case ReduceType::kAll:
+    return Reduce<bool, bool, AndOp, AndOp>(
+        input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
+        output_data, AndOp(), AndOp());
+  case ReduceType::kAny:
+    return Reduce<bool, bool, OrOp, OrOp>(
+        input_data, input_dims, input_num_dims, axis, num_axis_dimensions,
+        output_data, OrOp(), OrOp());
+  default:
+    return false;
   }
 }
 
 // Calculate the reduced product by rescaling each multiplication step to
 // avoid an overflow.
-template <typename T>
-struct ReducerFirst {
+template <typename T> struct ReducerFirst {
   explicit ReducerFirst(int input_zero_point_arg)
       : input_zero_point(input_zero_point_arg) {}
   int32_t operator()(T in) const { return in - input_zero_point; }
   int input_zero_point;
 };
 
-template <typename T>
-struct ReducerNext {
+template <typename T> struct ReducerNext {
   ReducerNext(int32_t input_zero_point_arg, int32_t scaling_multiplier_arg,
               int32_t scaling_shift_arg)
       : input_zero_point(input_zero_point_arg),
@@ -691,11 +707,11 @@ struct ReducerNext {
 
 template <typename T>
 inline bool QuantizedReduceProd(
-    const T* input_data, int32_t input_zero_point,
-    const RuntimeShape& input_shape, T* output_data, int32_t output_zero_point,
-    const RuntimeShape& output_shape, const int* axis,
-    const int64_t num_axis_dimensions, int* resolved_axis, int* normalized_dims,
-    int32_t* temp_prod, int32_t scaling_multiplier, int scaling_shift) {
+    const T *input_data, int32_t input_zero_point,
+    const RuntimeShape &input_shape, T *output_data, int32_t output_zero_point,
+    const RuntimeShape &output_shape, const int *axis,
+    const int64_t num_axis_dimensions, int *resolved_axis, int *normalized_dims,
+    int32_t *temp_prod, int32_t scaling_multiplier, int scaling_shift) {
   const int32_t kMinValue = std::numeric_limits<T>::min();
   const int32_t kMaxValue = std::numeric_limits<T>::max();
 
@@ -730,9 +746,9 @@ inline bool QuantizedReduceProd(
 }
 
 template <typename T>
-inline void Mean(const tflite::MeanParams& op_params,
-                 const RuntimeShape& input_shape, const T* input_data,
-                 const RuntimeShape& output_shape, T* output_data) {
+inline void Mean(const tflite::MeanParams &op_params,
+                 const RuntimeShape &input_shape, const T *input_data,
+                 const RuntimeShape &output_shape, T *output_data) {
   return reference_ops::Mean(op_params, input_shape, input_data, output_shape,
                              output_data);
 }
@@ -741,12 +757,12 @@ inline void Mean(const tflite::MeanParams& op_params,
 // It does so in two stages, first calculates the sum of elements along the axis
 // then divides it by the number of element in axis.
 template <typename T, typename U>
-inline bool MeanGeneral(const T* input_data, const int* input_dims,
-                        const int input_num_dims, T* output_data,
-                        const int* output_dims, const int output_num_dims,
-                        const int* axis, const int num_axis_dimensions,
-                        bool keep_dims, int* normalized_dims,
-                        int* resolved_axis, U* temp_sum) {
+inline bool MeanGeneral(const T *input_data, const int *input_dims,
+                        const int input_num_dims, T *output_data,
+                        const int *output_dims, const int output_num_dims,
+                        const int *axis, const int num_axis_dimensions,
+                        bool keep_dims, int *normalized_dims,
+                        int *resolved_axis, U *temp_sum) {
   ruy::profiler::ScopeLabel label("Mean");
   // Resolve axis.
   int num_resolved_axis = 0;
@@ -799,11 +815,11 @@ inline bool MeanGeneral(const T* input_data, const int* input_dims,
 }
 
 template <typename T, typename U>
-inline bool Mean(const T* input_data, const int* input_dims,
-                 const int input_num_dims, T* output_data,
-                 const int* output_dims, const int output_num_dims,
-                 const int* axis, const int num_axis_dimensions, bool keep_dims,
-                 int* normalized_dims, int* resolved_axis, U* temp_sum) {
+inline bool Mean(const T *input_data, const int *input_dims,
+                 const int input_num_dims, T *output_data,
+                 const int *output_dims, const int output_num_dims,
+                 const int *axis, const int num_axis_dimensions, bool keep_dims,
+                 int *normalized_dims, int *resolved_axis, U *temp_sum) {
   return MeanGeneral(input_data, input_dims, input_num_dims, output_data,
                      output_dims, output_num_dims, axis, num_axis_dimensions,
                      false, normalized_dims, resolved_axis, temp_sum);
@@ -812,13 +828,13 @@ inline bool Mean(const T* input_data, const int* input_dims,
 // Use Eigen when Mean is calculated over the last dimension only of a float
 // tensor.
 template <>
-inline bool Mean<float, float>(const float* input_data, const int* input_dims,
-                               const int input_num_dims, float* output_data,
-                               const int* output_dims,
-                               const int output_num_dims, const int* axis,
+inline bool Mean<float, float>(const float *input_data, const int *input_dims,
+                               const int input_num_dims, float *output_data,
+                               const int *output_dims,
+                               const int output_num_dims, const int *axis,
                                const int num_axis_dimensions, bool keep_dims,
-                               int* normalized_dims, int* resolved_axis,
-                               float* temp_sum) {
+                               int *normalized_dims, int *resolved_axis,
+                               float *temp_sum) {
   // Handle reduce_mean for the last dimensions.
   int num_resolved_axis = 0;
   int normalized_num_dims = 0;
@@ -841,7 +857,7 @@ inline bool Mean<float, float>(const float* input_data, const int* input_dims,
           static_cast<float>(last_input_dim);
     }
     return true;
-#endif  // USE_RVV
+#endif // USE_RVV
 
     // TODO(b/152563685): Consider use eigen to cover more general cases.
     const MatrixMap<const float> in_mat(input_data, last_input_dim,
@@ -859,11 +875,11 @@ inline bool Mean<float, float>(const float* input_data, const int* input_dims,
 // Computes the generic value (i.e., sum/max/min/prod) of elements across
 // dimensions given in axis. It needs to pass in init_value and reducer.
 template <typename T>
-inline bool ReduceGeneric(const T* input_data, const int* input_dims,
-                          const int input_num_dims, T* output_data,
-                          const int* output_dims, const int output_num_dims,
-                          const int* axis, const int64_t num_axis_dimensions,
-                          int* resolved_axis, int* normalized_dims,
+inline bool ReduceGeneric(const T *input_data, const int *input_dims,
+                          const int input_num_dims, T *output_data,
+                          const int *output_dims, const int output_num_dims,
+                          const int *axis, const int64_t num_axis_dimensions,
+                          int *resolved_axis, int *normalized_dims,
                           ReduceType reduce_type) {
   int num_resolved_axis = 0;
   int normalized_num_dims = 0;
@@ -885,13 +901,13 @@ inline bool ReduceGeneric(const T* input_data, const int* input_dims,
       return true;
     }
   }
-#endif  // USE_RVV
+#endif // USE_RVV
   return ReduceDispatcher(input_data, normalized_dims, normalized_num_dims,
                           output_dims, output_num_dims, output_data,
                           resolved_axis, num_resolved_axis, reduce_type);
 }
 
-}  // namespace optimized_ops
-}  // namespace tflite
+} // namespace optimized_ops
+} // namespace tflite
 
-#endif  // TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_REDUCE_H_
+#endif // TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_REDUCE_H_

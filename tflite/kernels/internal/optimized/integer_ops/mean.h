@@ -16,19 +16,22 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_MEAN_H_
 
 #include <algorithm>
+#include <limits>
+#include <vector>
 
 #include "tflite/kernels/cpu_backend_context.h"
 #include "tflite/kernels/cpu_backend_threadpool.h"
 #include "tflite/kernels/internal/common.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
 
 namespace tflite {
 namespace optimized_integer_ops {
 
-inline void MeanImpl(const tflite::MeanParams& op_params,
-                     const RuntimeShape& input_shape, const int8_t* input_data,
+inline void MeanImpl(const tflite::MeanParams &op_params,
+                     const RuntimeShape &input_shape, const int8_t *input_data,
                      int32 multiplier, int32 shift, int32 bias,
-                     const RuntimeShape& output_shape, int8_t* output_data,
+                     const RuntimeShape &output_shape, int8_t *output_data,
                      int start_depth, int end_depth) {
   ruy::profiler::ScopeLabel label("Mean4D/Int8/MeanImpl");
 
@@ -53,7 +56,7 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
   const int32x4_t bias_dup = vdupq_n_s32(bias);
   const int32x4_t min_dup = vdupq_n_s32(kMinValue);
   const int32x4_t max_dup = vdupq_n_s32(kMaxValue);
-#endif  // USE_NEON
+#endif // USE_NEON
   for (int out_b = 0; out_b < output_batch; ++out_b) {
     int out_d = start_depth;
 #ifdef USE_NEON
@@ -66,7 +69,7 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
       temp_sum.val[3] = vdupq_n_s32(0);
       for (int in_h = 0; in_h < input_height; ++in_h) {
         for (int in_w = 0; in_w < input_width; ++in_w) {
-          const int8_t* input_data_ptr =
+          const int8_t *input_data_ptr =
               input_data + Offset(input_shape, out_b, in_h, in_w, out_d);
           int8x16_t input_data_val = vld1q_s8(input_data_ptr);
 
@@ -119,11 +122,42 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
 
       int8x16_t combined_output = vcombine_s8(narrowed_low, narrowed_high);
 
-      int8_t* output_data_ptr =
+      int8_t *output_data_ptr =
           output_data + Offset(output_shape, out_b, 0, 0, out_d);
       vst1q_s8(output_data_ptr, combined_output);
     }
-#endif  // USE_NEON
+#endif // USE_NEON
+
+#if defined(USE_RVV)
+    std::vector<int32_t> rvv_output(end_depth - start_depth);
+    for (; out_d < end_depth;) {
+      const size_t vl = __riscv_vsetvl_e8m1(end_depth - out_d);
+      vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, vl);
+      for (int in_h = 0; in_h < input_height; ++in_h) {
+        for (int in_w = 0; in_w < input_width; ++in_w) {
+          const int8_t *input_data_ptr =
+              input_data + Offset(input_shape, out_b, in_h, in_w, out_d);
+          const vint8m1_t input_i8 = __riscv_vle8_v_i8m1(input_data_ptr, vl);
+          const vint32m4_t input_i32 = __riscv_vsext_vf2_i32m4(
+              __riscv_vsext_vf2_i16m2(input_i8, vl), vl);
+          acc = __riscv_vadd_vv_i32m4(acc, input_i32, vl);
+        }
+      }
+
+      int32_t *rvv_output_ptr = rvv_output.data() + out_d - start_depth;
+      __riscv_vse32_v_i32m4(rvv_output_ptr, acc, vl);
+      int8_t *output_data_ptr =
+          output_data + Offset(output_shape, out_b, 0, 0, out_d);
+      for (size_t i = 0; i < vl; ++i) {
+        int32_t quantized =
+            MultiplyByQuantizedMultiplier(rvv_output_ptr[i], multiplier, shift);
+        quantized += bias;
+        quantized = std::min(std::max(quantized, kMinValue), kMaxValue);
+        output_data_ptr[i] = static_cast<int8_t>(quantized);
+      }
+      out_d += vl;
+    }
+#endif // defined(USE_RVV)
 
     for (; out_d < end_depth; ++out_d) {
       int acc = 0;
@@ -143,46 +177,40 @@ inline void MeanImpl(const tflite::MeanParams& op_params,
 }
 
 struct MeanWorkerTask : cpu_backend_threadpool::Task {
-  MeanWorkerTask(const tflite::MeanParams& op_params,
-                 const RuntimeShape& input_shape, const int8_t* input_data,
+  MeanWorkerTask(const tflite::MeanParams &op_params,
+                 const RuntimeShape &input_shape, const int8_t *input_data,
                  int32 multiplier, int32 shift, int32 bias,
-                 const RuntimeShape& output_shape, int8_t* output_data,
+                 const RuntimeShape &output_shape, int8_t *output_data,
                  int start_height, int end_height)
-      : op_params(op_params),
-        input_shape(input_shape),
-        input_data(input_data),
-        multiplier(multiplier),
-        shift(shift),
-        bias(bias),
-        output_shape(output_shape),
-        output_data(output_data),
-        start_height(start_height),
-        end_height(end_height) {}
+      : op_params(op_params), input_shape(input_shape), input_data(input_data),
+        multiplier(multiplier), shift(shift), bias(bias),
+        output_shape(output_shape), output_data(output_data),
+        start_height(start_height), end_height(end_height) {}
 
   void Run() override {
     MeanImpl(op_params, input_shape, input_data, multiplier, shift, bias,
              output_shape, output_data, start_height, end_height);
   }
 
- private:
-  const tflite::MeanParams& op_params;
-  const RuntimeShape& input_shape;
-  const int8_t* input_data;
+private:
+  const tflite::MeanParams &op_params;
+  const RuntimeShape &input_shape;
+  const int8_t *input_data;
   int32 multiplier;
   int32 shift;
   int32 bias;
-  const RuntimeShape& output_shape;
-  int8_t* output_data;
+  const RuntimeShape &output_shape;
+  int8_t *output_data;
   int start_height;
   int end_height;
 };
 
-inline void Mean(const tflite::MeanParams& op_params,
-                 const RuntimeShape& unextended_input_shape,
-                 const int8_t* input_data, int32 input_zero_point,
-                 float input_scale, const RuntimeShape& unextended_output_shape,
-                 int8_t* output_data, int32 output_zero_point,
-                 float output_scale, CpuBackendContext* cpu_backend_context) {
+inline void Mean(const tflite::MeanParams &op_params,
+                 const RuntimeShape &unextended_input_shape,
+                 const int8_t *input_data, int32 input_zero_point,
+                 float input_scale, const RuntimeShape &unextended_output_shape,
+                 int8_t *output_data, int32 output_zero_point,
+                 float output_scale, CpuBackendContext *cpu_backend_context) {
   ruy::profiler::ScopeLabel label("Mean4D/Int8");
   // Current implementation only supports dimension equals 4 and simultaneous
   // reduction over width and height.
@@ -245,7 +273,7 @@ inline void Mean(const tflite::MeanParams& op_params,
   }
 }
 
-}  // namespace optimized_integer_ops
-}  // namespace tflite
+} // namespace optimized_integer_ops
+} // namespace tflite
 
-#endif  // TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_MEAN_H_
+#endif // TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_INTEGER_OPS_MEAN_H_
