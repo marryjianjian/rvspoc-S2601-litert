@@ -7103,6 +7103,210 @@ inline void SaturateAndStore(int16x8_t src, std::int8_t* dst) {
 #endif
 
 template <typename T>
+inline void RiscvScalarHardSwishQuantized(const HardSwishParams& params,
+                                          int flat_size, const T* input_data,
+                                          T* output_data) {
+  ruy::profiler::ScopeLabel label("HardSwish/Quantized/RiscvScalar");
+  for (int i = 0; i < flat_size; ++i) {
+    const int16_t input_value = input_data[i] - params.input_zero_point;
+    const int16_t input_value_on_hires_input_scale = input_value * (1 << 7);
+    const int16_t input_value_on_preshift_output_scale =
+        gemmlowp::SaturatingRoundingDoublingHighMul(
+            input_value_on_hires_input_scale,
+            params.output_multiplier_fixedpoint_int16);
+
+    int16_t reluish_value = input_value_on_hires_input_scale;
+    if (params.reluish_multiplier_exponent > 0) {
+      reluish_value = reference_ops::SaturatingLeftShift(
+          reluish_value, params.reluish_multiplier_exponent - 1);
+    }
+    reluish_value = gemmlowp::SaturatingRoundingDoublingHighMul(
+        reluish_value, params.reluish_multiplier_fixedpoint_int16);
+    if (params.reluish_multiplier_exponent > 0) {
+      reluish_value = reference_ops::SaturatingLeftShift(reluish_value, 1);
+    }
+    if (params.reluish_multiplier_exponent < 0) {
+      reluish_value = gemmlowp::RoundingDivideByPOT(
+          reluish_value, -params.reluish_multiplier_exponent);
+    }
+    reluish_value = (reluish_value + (1 << 15)) >> 1;
+
+    const int16_t preshift_output_value =
+        reference_ops::SaturatingDoublingHighMul(
+            reluish_value, input_value_on_preshift_output_scale);
+    int16_t output_value = gemmlowp::RoundingDivideByPOT(
+        preshift_output_value, -params.output_multiplier_exponent);
+    output_value += params.output_zero_point;
+    output_value =
+        std::min<int16_t>(output_value, std::numeric_limits<T>::max());
+    output_value =
+        std::max<int16_t>(output_value, std::numeric_limits<T>::min());
+    output_data[i] = static_cast<T>(output_value);
+  }
+}
+
+#ifdef USE_RVV
+inline vint32m4_t RvvSaturatingLeftShiftInt16(vint32m4_t value, int amount,
+                                              size_t vl) {
+  if (amount >= 17) {
+    const vbool8_t positive_mask = __riscv_vmsgt_vx_i32m4_b8(value, 0, vl);
+    const vbool8_t negative_mask = __riscv_vmslt_vx_i32m4_b8(value, 0, vl);
+    vint32m4_t saturated = __riscv_vmerge_vxm_i32m4(
+        value, static_cast<int32_t>(std::numeric_limits<int16_t>::max()),
+        positive_mask, vl);
+    saturated = __riscv_vmerge_vxm_i32m4(
+        saturated, static_cast<int32_t>(std::numeric_limits<int16_t>::min()),
+        negative_mask, vl);
+    return saturated;
+  }
+  if (amount > 0) {
+    value = __riscv_vsll_vx_i32m4(value, amount, vl);
+  }
+  value = __riscv_vmax_vx_i32m4(
+      value, static_cast<int32_t>(std::numeric_limits<int16_t>::min()), vl);
+  value = __riscv_vmin_vx_i32m4(
+      value, static_cast<int32_t>(std::numeric_limits<int16_t>::max()), vl);
+  return value;
+}
+
+inline vint32m4_t RvvTruncatingDivideByPOT(vint32m4_t x, int exponent,
+                                           size_t vl) {
+  const int32_t mask = (1ll << exponent) - 1;
+  const vint32m4_t remainder = __riscv_vand_vx_i32m4(x, mask, vl);
+  const vint32m4_t shifted = __riscv_vsra_vx_i32m4(x, exponent, vl);
+  const vbool8_t negative_mask = __riscv_vmslt_vx_i32m4_b8(x, 0, vl);
+  const vbool8_t non_zero_remainder_mask =
+      __riscv_vmsne_vx_i32m4_b8(remainder, 0, vl);
+  const vbool8_t correction_mask =
+      __riscv_vmand_mm_b8(negative_mask, non_zero_remainder_mask, vl);
+  const vint32m4_t corrected = __riscv_vadd_vx_i32m4(shifted, 1, vl);
+  return __riscv_vmerge_vvm_i32m4(shifted, corrected, correction_mask, vl);
+}
+
+inline vint32m4_t RvvSaturatingRoundingDoublingHighMulInt16(
+    vint32m4_t x, int16_t multiplier, size_t vl) {
+  const int32_t multiplier_i32 = multiplier;
+  vint32m4_t product = __riscv_vmul_vx_i32m4(x, multiplier_i32, vl);
+  const vbool8_t negative_product_mask =
+      __riscv_vmslt_vx_i32m4_b8(product, 0, vl);
+  const vint32m4_t positive_nudge = __riscv_vmv_v_x_i32m4(1 << 14, vl);
+  const vint32m4_t negative_nudge = __riscv_vmv_v_x_i32m4(1 - (1 << 14), vl);
+  const vint32m4_t nudge = __riscv_vmerge_vvm_i32m4(
+      positive_nudge, negative_nudge, negative_product_mask, vl);
+  product = __riscv_vadd_vv_i32m4(product, nudge, vl);
+  vint32m4_t result = RvvTruncatingDivideByPOT(product, 15, vl);
+  if (multiplier == std::numeric_limits<int16_t>::min()) {
+    const vbool8_t overflow_mask = __riscv_vmseq_vx_i32m4_b8(
+        x, static_cast<int32_t>(std::numeric_limits<int16_t>::min()), vl);
+    const vint32m4_t saturated = __riscv_vmv_v_x_i32m4(
+        static_cast<int32_t>(std::numeric_limits<int16_t>::max()), vl);
+    result = __riscv_vmerge_vvm_i32m4(result, saturated, overflow_mask, vl);
+  }
+  return result;
+}
+
+inline vint32m4_t RvvSaturatingDoublingHighMulInt16(vint32m4_t x,
+                                                    vint32m4_t multiplier,
+                                                    size_t vl) {
+  const vint32m4_t product = __riscv_vmul_vv_i32m4(x, multiplier, vl);
+  vint32m4_t result = RvvTruncatingDivideByPOT(product, 15, vl);
+  const vbool8_t x_min_mask = __riscv_vmseq_vx_i32m4_b8(
+      x, static_cast<int32_t>(std::numeric_limits<int16_t>::min()), vl);
+  const vbool8_t multiplier_min_mask = __riscv_vmseq_vx_i32m4_b8(
+      multiplier, static_cast<int32_t>(std::numeric_limits<int16_t>::min()),
+      vl);
+  const vbool8_t overflow_mask =
+      __riscv_vmand_mm_b8(x_min_mask, multiplier_min_mask, vl);
+  const vint32m4_t saturated = __riscv_vmv_v_x_i32m4(
+      static_cast<int32_t>(std::numeric_limits<int16_t>::max()), vl);
+  result = __riscv_vmerge_vvm_i32m4(result, saturated, overflow_mask, vl);
+  return result;
+}
+
+template <typename T>
+inline vint32m4_t RvvLoadHardSwishInput(const T* input_data,
+                                        int input_zero_point, size_t vl) {
+  if constexpr (std::is_same<T, int8_t>::value) {
+    const vint8m1_t input_i8 = __riscv_vle8_v_i8m1(input_data, vl);
+    const vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
+    return __riscv_vsub_vx_i32m4(__riscv_vsext_vf2_i32m4(input_i16, vl),
+                                 input_zero_point, vl);
+  } else {
+    const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input_data, vl);
+    const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
+    const vint32m4_t input_i32 = __riscv_vreinterpret_v_u32m4_i32m4(
+        __riscv_vzext_vf2_u32m4(input_u16, vl));
+    return __riscv_vsub_vx_i32m4(input_i32, input_zero_point, vl);
+  }
+}
+
+template <typename T>
+inline void RvvStoreHardSwishOutput(vint32m4_t output, T* output_data,
+                                    size_t vl) {
+  output = __riscv_vmax_vx_i32m4(
+      output, static_cast<int32_t>(std::numeric_limits<T>::min()), vl);
+  output = __riscv_vmin_vx_i32m4(
+      output, static_cast<int32_t>(std::numeric_limits<T>::max()), vl);
+  if constexpr (std::is_same<T, int8_t>::value) {
+    const vint16m2_t output_i16 = __riscv_vnsra_wx_i16m2(output, 0, vl);
+    const vint8m1_t output_i8 = __riscv_vnsra_wx_i8m1(output_i16, 0, vl);
+    __riscv_vse8_v_i8m1(output_data, output_i8, vl);
+  } else {
+    const vuint32m4_t output_u32 =
+        __riscv_vreinterpret_v_i32m4_u32m4(output);
+    const vuint16m2_t output_u16 = __riscv_vnsrl_wx_u16m2(output_u32, 0, vl);
+    const vuint8m1_t output_u8 = __riscv_vnsrl_wx_u8m1(output_u16, 0, vl);
+    __riscv_vse8_v_u8m1(output_data, output_u8, vl);
+  }
+}
+
+template <typename T>
+inline void RvvHardSwishQuantized(const HardSwishParams& params, int flat_size,
+                                  const T* input_data, T* output_data) {
+  ruy::profiler::ScopeLabel label("HardSwish/Quantized/RVV");
+  int i = 0;
+  while (i < flat_size) {
+    const size_t vl = __riscv_vsetvl_e8m1(flat_size - i);
+    const vint32m4_t input_value =
+        RvvLoadHardSwishInput(input_data + i, params.input_zero_point, vl);
+    const vint32m4_t input_value_on_hires_input_scale =
+        __riscv_vsll_vx_i32m4(input_value, 7, vl);
+    const vint32m4_t input_value_on_preshift_output_scale =
+        RvvSaturatingRoundingDoublingHighMulInt16(
+            input_value_on_hires_input_scale,
+            params.output_multiplier_fixedpoint_int16, vl);
+
+    vint32m4_t reluish_value = input_value_on_hires_input_scale;
+    if (params.reluish_multiplier_exponent > 0) {
+      reluish_value = RvvSaturatingLeftShiftInt16(
+          reluish_value, params.reluish_multiplier_exponent - 1, vl);
+    }
+    reluish_value = RvvSaturatingRoundingDoublingHighMulInt16(
+        reluish_value, params.reluish_multiplier_fixedpoint_int16, vl);
+    if (params.reluish_multiplier_exponent > 0) {
+      reluish_value = RvvSaturatingLeftShiftInt16(reluish_value, 1, vl);
+    }
+    if (params.reluish_multiplier_exponent < 0) {
+      reluish_value = rvv_ops::RoundingDivideByPOT(
+          reluish_value, -params.reluish_multiplier_exponent, vl);
+    }
+    reluish_value = __riscv_vsra_vx_i32m4(
+        __riscv_vadd_vx_i32m4(reluish_value, 1 << 15, vl), 1, vl);
+
+    const vint32m4_t preshift_output_value =
+        RvvSaturatingDoublingHighMulInt16(
+            reluish_value, input_value_on_preshift_output_scale, vl);
+    vint32m4_t output_value = rvv_ops::RoundingDivideByPOT(
+        preshift_output_value, -params.output_multiplier_exponent, vl);
+    output_value =
+        __riscv_vadd_vx_i32m4(output_value, params.output_zero_point, vl);
+    RvvStoreHardSwishOutput(output_value, output_data + i, vl);
+    i += vl;
+  }
+}
+#endif  // USE_RVV
+
+template <typename T>
 inline void HardSwish(const HardSwishParams& params,
                       const RuntimeShape& input_shape, const T* input_data,
                       const RuntimeShape& output_shape, T* output_data) {
@@ -7252,6 +7456,12 @@ inline void HardSwish(const HardSwishParams& params,
     output_value = vaddq_s16(output_value, output_zero_point);
     SaturateAndStore(output_value, output_data + i);
   }
+#elif defined(USE_RVV)
+  RvvHardSwishQuantized(params, flat_size, input_data, output_data);
+  i = flat_size;
+#elif defined(__riscv)
+  RiscvScalarHardSwishQuantized(params, flat_size, input_data, output_data);
+  i = flat_size;
 #endif
   // TODO(b/137208495): revisit when unit tests cover reference code.
   // Fall back to reference_ops::HardSwish. In general we have preferred

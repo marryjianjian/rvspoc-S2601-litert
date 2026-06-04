@@ -40,6 +40,7 @@ limitations under the License.
 #include "tflite/kernels/internal/optimized/resize_bilinear.h"
 #include "tflite/kernels/internal/optimized/rvv_check.h"
 #include "tflite/kernels/internal/portable_tensor_utils.h"
+#include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/add.h"
 #include "tflite/kernels/internal/reference/conv.h"
 #include "tflite/kernels/internal/reference/depthwiseconv_float.h"
@@ -293,6 +294,87 @@ std::vector<uint8_t> MakeUint8Input(int size, int offset) {
   std::vector<uint8_t> values(size);
   for (int i = 0; i < size; ++i) {
     values[i] = static_cast<uint8_t>((i * 53 + offset) % 256);
+  }
+  return values;
+}
+
+template <typename T>
+int QuantizedZeroPointFromMinMax(float min, float max) {
+  const int qmin = static_cast<int>(std::numeric_limits<T>::min());
+  const int qmax = static_cast<int>(std::numeric_limits<T>::max());
+  const float scale = (max - min) / static_cast<float>(qmax - qmin);
+  const int zero_point =
+      qmin - static_cast<int>(std::round(min / scale));
+  return std::min(qmax, std::max(qmin, zero_point));
+}
+
+template <typename T>
+float QuantizedScaleFromMinMax(float min, float max) {
+  const int qmin = static_cast<int>(std::numeric_limits<T>::min());
+  const int qmax = static_cast<int>(std::numeric_limits<T>::max());
+  return (max - min) / static_cast<float>(qmax - qmin);
+}
+
+template <typename T>
+HardSwishParams MakeQuantizedHardSwishParams(float input_min, float input_max,
+                                             float output_min,
+                                             float output_max) {
+  HardSwishParams params;
+  params.input_zero_point =
+      QuantizedZeroPointFromMinMax<T>(input_min, input_max);
+  params.output_zero_point =
+      QuantizedZeroPointFromMinMax<T>(output_min, output_max);
+  const float input_scale =
+      QuantizedScaleFromMinMax<T>(input_min, input_max);
+  const float hires_input_scale = (1.0f / 128.0f) * input_scale;
+  const float reluish_scale = 3.0f / 32768.0f;
+  const float output_scale =
+      QuantizedScaleFromMinMax<T>(output_min, output_max);
+
+  int32_t output_multiplier_fixedpoint_int32;
+  QuantizeMultiplier(hires_input_scale / output_scale,
+                     &output_multiplier_fixedpoint_int32,
+                     &params.output_multiplier_exponent);
+  DownScaleInt32ToInt16Multiplier(
+      output_multiplier_fixedpoint_int32,
+      &params.output_multiplier_fixedpoint_int16);
+
+  int32_t reluish_multiplier_fixedpoint_int32;
+  QuantizeMultiplier(hires_input_scale / reluish_scale,
+                     &reluish_multiplier_fixedpoint_int32,
+                     &params.reluish_multiplier_exponent);
+  DownScaleInt32ToInt16Multiplier(
+      reluish_multiplier_fixedpoint_int32,
+      &params.reluish_multiplier_fixedpoint_int16);
+  return params;
+}
+
+template <typename T>
+std::vector<T> MakeHardSwishQuantizedInput(int size, int offset,
+                                           int zero_point) {
+  std::vector<T> values(size);
+  if constexpr (std::is_same<T, int8_t>::value) {
+    values = MakeInt8Input(size, offset);
+  } else {
+    values = MakeUint8Input(size, offset);
+  }
+  const int special_values[] = {
+      static_cast<int>(std::numeric_limits<T>::min()),
+      static_cast<int>(std::numeric_limits<T>::max()),
+      static_cast<int>(std::numeric_limits<T>::min()) + 1,
+      static_cast<int>(std::numeric_limits<T>::max()) - 1,
+      zero_point,
+      zero_point - 1,
+      zero_point + 1,
+      0,
+  };
+  const int qmin = static_cast<int>(std::numeric_limits<T>::min());
+  const int qmax = static_cast<int>(std::numeric_limits<T>::max());
+  const int count = std::min(
+      size, static_cast<int>(sizeof(special_values) / sizeof(special_values[0])));
+  for (int i = 0; i < count; ++i) {
+    values[i] =
+        static_cast<T>(std::min(qmax, std::max(qmin, special_values[i])));
   }
   return values;
 }
@@ -2280,6 +2362,63 @@ TEST(RvvOpsTest, FloatHardSwishMatchesReferenceAcrossVectorBoundaries) {
     SCOPED_TRACE(::testing::Message() << "size=" << size);
     ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
+}
+
+template <typename T>
+void ExpectQuantizedHardSwishRiscvScalarAndRvvMatchReference(
+    const std::vector<int> &sizes, int input_offset) {
+  const HardSwishParams param_cases[] = {
+      MakeQuantizedHardSwishParams<T>(0.0f, 1.0f, 0.0f, 1.0f),
+      MakeQuantizedHardSwishParams<T>(-5.0f, 10.0f, -2.0f, 1.0f),
+      MakeQuantizedHardSwishParams<T>(-40.0f, 60.0f, -40.0f, 60.0f),
+      MakeQuantizedHardSwishParams<T>(-11.654928f, 25.036512f, -0.3905796f,
+                                      24.50887f),
+  };
+
+  for (const HardSwishParams &params : param_cases) {
+    for (int size : sizes) {
+      const RuntimeShape shape({size});
+      const std::vector<T> input = MakeHardSwishQuantizedInput<T>(
+          size, input_offset, params.input_zero_point);
+      std::vector<T> scalar(size);
+      std::vector<T> rvv(size);
+      std::vector<T> optimized(size);
+      std::vector<T> expected(size);
+
+      optimized_ops::RiscvScalarHardSwishQuantized(
+          params, size, input.data(), scalar.data());
+      optimized_ops::RvvHardSwishQuantized(params, size, input.data(),
+                                           rvv.data());
+      optimized_ops::HardSwish(params, shape, input.data(), shape,
+                               optimized.data());
+      reference_ops::HardSwish(params, shape, input.data(), shape,
+                               expected.data());
+
+      SCOPED_TRACE(::testing::Message()
+                   << "size=" << size
+                   << " input_zero_point=" << params.input_zero_point
+                   << " output_zero_point=" << params.output_zero_point
+                   << " reluish_exponent="
+                   << params.reluish_multiplier_exponent
+                   << " output_exponent="
+                   << params.output_multiplier_exponent);
+      EXPECT_THAT(scalar, ElementsAreArray(expected));
+      EXPECT_THAT(rvv, ElementsAreArray(expected));
+      EXPECT_THAT(optimized, ElementsAreArray(expected));
+    }
+  }
+}
+
+TEST(RvvOpsTest,
+     Int8HardSwishRiscvScalarAndRvvMatchReferenceAcrossVectorBoundaries) {
+  ExpectQuantizedHardSwishRiscvScalarAndRvvMatchReference<int8_t>(
+      Int8M1VectorLengths(), 79);
+}
+
+TEST(RvvOpsTest,
+     Uint8HardSwishRiscvScalarAndRvvMatchReferenceAcrossVectorBoundaries) {
+  ExpectQuantizedHardSwishRiscvScalarAndRvvMatchReference<uint8_t>(
+      Int8M1VectorLengths(), 151);
 }
 
 TEST(RvvOpsTest, FloatLogisticMatchesScalarAcrossVectorBoundaries) {
