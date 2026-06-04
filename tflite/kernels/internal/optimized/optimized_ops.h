@@ -1011,6 +1011,34 @@ inline void Conv(const ConvParams& params, const RuntimeShape& input_shape,
 #endif  //  defined(TF_LITE_USE_CBLAS) && defined(__APPLE__)
 }
 
+#if defined(__riscv)
+inline void RiscvScalarHybridConv(
+    const ConvParams& params, float* scaling_factors_ptr,
+    const RuntimeShape& input_shape, const int8_t* input_data,
+    const RuntimeShape& filter_shape, const int8_t* filter_data,
+    const RuntimeShape& bias_shape, const float* bias_data,
+    const RuntimeShape& accum_scratch_shape, int32_t* accum_scratch,
+    const RuntimeShape& output_shape, float* output_data,
+    const RuntimeShape& im2col_shape, int8_t* im2col_data,
+    CpuBackendContext* context);
+#endif  // defined(__riscv)
+
+#ifdef USE_RVV
+inline void RvvHybridConv(const ConvParams& params, float* scaling_factors_ptr,
+                          const RuntimeShape& input_shape,
+                          const int8_t* input_data,
+                          const RuntimeShape& filter_shape,
+                          const int8_t* filter_data,
+                          const RuntimeShape& bias_shape,
+                          const float* bias_data,
+                          const RuntimeShape& accum_scratch_shape,
+                          int32_t* accum_scratch,
+                          const RuntimeShape& output_shape,
+                          float* output_data,
+                          const RuntimeShape& im2col_shape,
+                          int8_t* im2col_data, CpuBackendContext* context);
+#endif  // USE_RVV
+
 inline void HybridConv(const ConvParams& params, float* scaling_factors_ptr,
                        const RuntimeShape& input_shape,
                        const int8_t* input_data,
@@ -1030,6 +1058,20 @@ inline void HybridConv(const ConvParams& params, float* scaling_factors_ptr,
   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
   TFLITE_DCHECK_EQ(filter_shape.DimensionsCount(), 4);
   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
+
+#ifdef USE_RVV
+  RvvHybridConv(params, scaling_factors_ptr, input_shape, input_data,
+                filter_shape, filter_data, bias_shape, bias_data,
+                accum_scratch_shape, accum_scratch, output_shape, output_data,
+                im2col_shape, im2col_data, context);
+  return;
+#elif defined(__riscv)
+  RiscvScalarHybridConv(params, scaling_factors_ptr, input_shape, input_data,
+                        filter_shape, filter_data, bias_shape, bias_data,
+                        accum_scratch_shape, accum_scratch, output_shape,
+                        output_data, im2col_shape, im2col_data, context);
+  return;
+#endif
 
   const int batch_size = input_shape.Dims(0);
   const int filter_width = filter_shape.Dims(2);
@@ -1102,6 +1144,205 @@ inline void HybridConv(const ConvParams& params, float* scaling_factors_ptr,
                                    bias_shape, bias_data, output_shape,
                                    output_data);
 }
+
+#if defined(__riscv)
+inline int32_t RiscvScalarHybridConvDotProductInt8(const int8_t* lhs,
+                                                   const int8_t* rhs,
+                                                   int size) {
+  int32_t acc = 0;
+  for (int i = 0; i < size; ++i) {
+    acc += static_cast<int32_t>(lhs[i]) * static_cast<int32_t>(rhs[i]);
+  }
+  return acc;
+}
+
+inline void RiscvScalarHybridConvMatrixBatchVectorMultiplyAccumulate(
+    const int8_t* matrix, int m_rows, int m_cols, const int8_t* vectors,
+    const float* scaling_factors, int n_batch, int32_t* scratch,
+    float* result) {
+  for (int batch = 0; batch < n_batch; ++batch) {
+    const int8_t* vector = vectors + batch * m_cols;
+    for (int row = 0; row < m_rows; ++row) {
+      const int32_t dotprod = RiscvScalarHybridConvDotProductInt8(
+          matrix + row * m_cols, vector, m_cols);
+      scratch[batch * m_rows + row] = dotprod;
+      result[batch * m_rows + row] += dotprod * scaling_factors[batch];
+    }
+  }
+}
+
+inline void RiscvScalarHybridConv(
+    const ConvParams& params, float* scaling_factors_ptr,
+    const RuntimeShape& input_shape, const int8_t* input_data,
+    const RuntimeShape& filter_shape, const int8_t* filter_data,
+    const RuntimeShape& bias_shape, const float* bias_data,
+    const RuntimeShape& accum_scratch_shape, int32_t* accum_scratch,
+    const RuntimeShape& output_shape, float* output_data,
+    const RuntimeShape& im2col_shape, int8_t* im2col_data,
+    CpuBackendContext* context) {
+  (void)context;
+  const int stride_width = params.stride_width;
+  const int stride_height = params.stride_height;
+  const int dilation_width_factor = params.dilation_width_factor;
+  const int dilation_height_factor = params.dilation_height_factor;
+  const int filter_width = filter_shape.Dims(2);
+  const int filter_height = filter_shape.Dims(1);
+  const bool need_dilated_im2col =
+      dilation_width_factor != 1 || dilation_height_factor != 1;
+  const bool need_im2col = stride_width != 1 || stride_height != 1 ||
+                           filter_width != 1 || filter_height != 1;
+
+  const int input_zero_point = 0;
+  const int8_t* gemm_input_data = nullptr;
+  int num_input = 0;
+  if (need_dilated_im2col) {
+    DilatedIm2col(params, input_zero_point, input_shape, input_data,
+                  filter_shape, output_shape, im2col_data);
+    gemm_input_data = im2col_data;
+    num_input = im2col_shape.FlatSize();
+  } else if (need_im2col) {
+    TFLITE_DCHECK(im2col_data);
+    Im2col(params, filter_height, filter_width, input_zero_point, input_shape,
+           input_data, im2col_shape, im2col_data);
+    gemm_input_data = im2col_data;
+    num_input = im2col_shape.FlatSize();
+  } else {
+    TFLITE_DCHECK(!im2col_data);
+    gemm_input_data = input_data;
+    num_input = input_shape.FlatSize();
+  }
+
+  const int batch_size = input_shape.Dims(0);
+  const int filter_rows = filter_shape.Dims(0);
+  const int filter_cols = FlatSizeSkipDim(filter_shape, 0);
+  const int gemm_input_cols = filter_cols;
+  const int gemm_input_rows = num_input / gemm_input_cols;
+  const int output_cols = output_shape.Dims(3);
+  const int output_rows = FlatSizeSkipDim(output_shape, 3);
+  TFLITE_DCHECK_EQ(output_cols, filter_rows);
+  TFLITE_DCHECK_EQ(output_rows, gemm_input_rows);
+  TFLITE_DCHECK_EQ(accum_scratch_shape.FlatSize(), output_shape.FlatSize());
+
+  const int rows_per_batch = gemm_input_rows / batch_size;
+  for (int i = gemm_input_rows - 1; i >= 0; --i) {
+    scaling_factors_ptr[i] = scaling_factors_ptr[i / rows_per_batch];
+  }
+
+  std::fill_n(output_data, output_rows * output_cols, 0.0f);
+  RiscvScalarHybridConvMatrixBatchVectorMultiplyAccumulate(
+      filter_data, filter_rows, filter_cols, gemm_input_data,
+      scaling_factors_ptr, gemm_input_rows, accum_scratch, output_data);
+  AddBiasAndEvalActivationFunction(params.float_activation_min,
+                                   params.float_activation_max, bias_shape,
+                                   bias_data, output_shape, output_data);
+}
+#endif  // defined(__riscv)
+
+#ifdef USE_RVV
+inline int32_t RvvHybridConvDotProductInt8(const int8_t* lhs,
+                                           const int8_t* rhs, int size) {
+  int32_t acc = 0;
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vint8m1_t lhs_i8 = __riscv_vle8_v_i8m1(lhs + i, vl);
+    const vint8m1_t rhs_i8 = __riscv_vle8_v_i8m1(rhs + i, vl);
+    const vint16m2_t lhs_i16 = __riscv_vsext_vf2_i16m2(lhs_i8, vl);
+    const vint16m2_t rhs_i16 = __riscv_vsext_vf2_i16m2(rhs_i8, vl);
+    const vint32m4_t product =
+        __riscv_vwmul_vv_i32m4(lhs_i16, rhs_i16, vl);
+    vint32m1_t reduced = __riscv_vmv_v_x_i32m1(acc, 1);
+    reduced = __riscv_vredsum_vs_i32m4_i32m1(product, reduced, vl);
+    acc = __riscv_vmv_x_s_i32m1_i32(reduced);
+    i += vl;
+  }
+  return acc;
+}
+
+inline void RvvHybridConvMatrixBatchVectorMultiplyAccumulate(
+    const int8_t* matrix, int m_rows, int m_cols, const int8_t* vectors,
+    const float* scaling_factors, int n_batch, int32_t* scratch,
+    float* result) {
+  for (int batch = 0; batch < n_batch; ++batch) {
+    const int8_t* vector = vectors + batch * m_cols;
+    for (int row = 0; row < m_rows; ++row) {
+      const int32_t dotprod =
+          RvvHybridConvDotProductInt8(matrix + row * m_cols, vector, m_cols);
+      scratch[batch * m_rows + row] = dotprod;
+      result[batch * m_rows + row] += dotprod * scaling_factors[batch];
+    }
+  }
+}
+
+inline void RvvHybridConv(const ConvParams& params, float* scaling_factors_ptr,
+                          const RuntimeShape& input_shape,
+                          const int8_t* input_data,
+                          const RuntimeShape& filter_shape,
+                          const int8_t* filter_data,
+                          const RuntimeShape& bias_shape,
+                          const float* bias_data,
+                          const RuntimeShape& accum_scratch_shape,
+                          int32_t* accum_scratch,
+                          const RuntimeShape& output_shape,
+                          float* output_data,
+                          const RuntimeShape& im2col_shape,
+                          int8_t* im2col_data, CpuBackendContext* context) {
+  (void)context;
+  const int stride_width = params.stride_width;
+  const int stride_height = params.stride_height;
+  const int dilation_width_factor = params.dilation_width_factor;
+  const int dilation_height_factor = params.dilation_height_factor;
+  const int filter_width = filter_shape.Dims(2);
+  const int filter_height = filter_shape.Dims(1);
+  const bool need_dilated_im2col =
+      dilation_width_factor != 1 || dilation_height_factor != 1;
+  const bool need_im2col = stride_width != 1 || stride_height != 1 ||
+                           filter_width != 1 || filter_height != 1;
+
+  const int input_zero_point = 0;
+  const int8_t* gemm_input_data = nullptr;
+  int num_input = 0;
+  if (need_dilated_im2col) {
+    DilatedIm2col(params, input_zero_point, input_shape, input_data,
+                  filter_shape, output_shape, im2col_data);
+    gemm_input_data = im2col_data;
+    num_input = im2col_shape.FlatSize();
+  } else if (need_im2col) {
+    TFLITE_DCHECK(im2col_data);
+    Im2col(params, filter_height, filter_width, input_zero_point, input_shape,
+           input_data, im2col_shape, im2col_data);
+    gemm_input_data = im2col_data;
+    num_input = im2col_shape.FlatSize();
+  } else {
+    TFLITE_DCHECK(!im2col_data);
+    gemm_input_data = input_data;
+    num_input = input_shape.FlatSize();
+  }
+
+  const int batch_size = input_shape.Dims(0);
+  const int filter_rows = filter_shape.Dims(0);
+  const int filter_cols = FlatSizeSkipDim(filter_shape, 0);
+  const int gemm_input_cols = filter_cols;
+  const int gemm_input_rows = num_input / gemm_input_cols;
+  const int output_cols = output_shape.Dims(3);
+  const int output_rows = FlatSizeSkipDim(output_shape, 3);
+  TFLITE_DCHECK_EQ(output_cols, filter_rows);
+  TFLITE_DCHECK_EQ(output_rows, gemm_input_rows);
+  TFLITE_DCHECK_EQ(accum_scratch_shape.FlatSize(), output_shape.FlatSize());
+
+  const int rows_per_batch = gemm_input_rows / batch_size;
+  for (int i = gemm_input_rows - 1; i >= 0; --i) {
+    scaling_factors_ptr[i] = scaling_factors_ptr[i / rows_per_batch];
+  }
+
+  rvv_ops::FillVector(output_data, output_rows * output_cols, 0.0f);
+  RvvHybridConvMatrixBatchVectorMultiplyAccumulate(
+      filter_data, filter_rows, filter_cols, gemm_input_data,
+      scaling_factors_ptr, gemm_input_rows, accum_scratch, output_data);
+  AddBiasAndEvalActivationFunction(params.float_activation_min,
+                                   params.float_activation_max, bias_shape,
+                                   bias_data, output_shape, output_data);
+}
+#endif  // USE_RVV
 
 inline void HybridConvPerChannel(
     const ConvParams& params, float* scaling_factors_ptr,

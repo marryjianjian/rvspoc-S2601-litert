@@ -1986,6 +1986,119 @@ TEST(RvvOpsTest, FloatConv1x1GemmMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, HybridConvRiscvScalarAndRvvMatchReference) {
+  ConvParams params;
+  params.padding_type = PaddingType::kSame;
+  params.padding_values.width = 1;
+  params.padding_values.height = 1;
+  params.stride_width = 2;
+  params.stride_height = 2;
+  params.dilation_width_factor = 1;
+  params.dilation_height_factor = 1;
+  params.float_activation_min = -3.0f;
+  params.float_activation_max = 3.0f;
+  constexpr int kBatches = 2;
+  constexpr int kInputHeight = 5;
+  constexpr int kInputWidth = 6;
+  constexpr int kFilterHeight = 3;
+  constexpr int kFilterWidth = 3;
+  constexpr int kOutputHeight = 3;
+  constexpr int kOutputWidth = 3;
+  constexpr int kOutputDepth = 5;
+  constexpr float kFilterScale = 0.03125f;
+  const RuntimeShape bias_shape({kOutputDepth});
+  std::vector<float> bias = MakeInput(kOutputDepth, -0.25f);
+  for (float &value : bias) {
+    value *= 0.125f;
+  }
+
+  for (int input_depth : Int8M1VectorLengths()) {
+    if (input_depth == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape(
+        {kBatches, kInputHeight, kInputWidth, input_depth});
+    const RuntimeShape filter_shape(
+        {kOutputDepth, kFilterHeight, kFilterWidth, input_depth});
+    const RuntimeShape output_shape(
+        {kBatches, kOutputHeight, kOutputWidth, kOutputDepth});
+    const RuntimeShape im2col_shape(
+        {kBatches, kOutputHeight, kOutputWidth,
+         kFilterHeight * kFilterWidth * input_depth});
+    const RuntimeShape accum_scratch_shape(
+        {kOutputDepth, kBatches * kOutputHeight * kOutputWidth});
+    std::vector<float> input_float = MakeInput(input_shape.FlatSize(), 0.5f);
+    for (float &value : input_float) {
+      value *= 0.25f;
+    }
+    std::vector<int8_t> input(input_shape.FlatSize());
+    std::vector<float> batch_scales(kBatches);
+    const int input_size = input_shape.FlatSize() / kBatches;
+    for (int batch = 0; batch < kBatches; ++batch) {
+      float min;
+      float max;
+      tensor_utils::SymmetricQuantizeFloats(
+          input_float.data() + batch * input_size, input_size,
+          input.data() + batch * input_size, &min, &max,
+          &batch_scales[batch]);
+      batch_scales[batch] *= kFilterScale;
+    }
+    const std::vector<int8_t> filter =
+        MakeInt8Input(filter_shape.FlatSize(), 157);
+    const std::vector<float> per_channel_scale(kOutputDepth, 1.0f);
+    std::vector<int32_t> input_offsets(kBatches, 0);
+    std::vector<float> scalar_scales(kBatches * kOutputHeight * kOutputWidth);
+    std::vector<float> rvv_scales(kBatches * kOutputHeight * kOutputWidth);
+    std::vector<float> optimized_scales(kBatches * kOutputHeight *
+                                        kOutputWidth);
+    std::vector<float> reference_scales = batch_scales;
+    std::copy(batch_scales.begin(), batch_scales.end(),
+              scalar_scales.begin());
+    std::copy(batch_scales.begin(), batch_scales.end(), rvv_scales.begin());
+    std::copy(batch_scales.begin(), batch_scales.end(),
+              optimized_scales.begin());
+    std::vector<int8_t> scalar_im2col(im2col_shape.FlatSize());
+    std::vector<int8_t> rvv_im2col(im2col_shape.FlatSize());
+    std::vector<int8_t> optimized_im2col(im2col_shape.FlatSize());
+    std::vector<int8_t> reference_im2col(im2col_shape.FlatSize());
+    std::vector<int32_t> scalar_scratch(accum_scratch_shape.FlatSize());
+    std::vector<int32_t> rvv_scratch(accum_scratch_shape.FlatSize());
+    std::vector<int32_t> optimized_scratch(accum_scratch_shape.FlatSize());
+    std::vector<float> scalar(output_shape.FlatSize());
+    std::vector<float> rvv(output_shape.FlatSize());
+    std::vector<float> optimized(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    optimized_ops::RiscvScalarHybridConv(
+        params, scalar_scales.data(), input_shape, input.data(), filter_shape,
+        filter.data(), bias_shape, bias.data(), accum_scratch_shape,
+        scalar_scratch.data(), output_shape, scalar.data(), im2col_shape,
+        scalar_im2col.data(), /*context=*/nullptr);
+    optimized_ops::RvvHybridConv(params, rvv_scales.data(), input_shape,
+                                 input.data(), filter_shape, filter.data(),
+                                 bias_shape, bias.data(), accum_scratch_shape,
+                                 rvv_scratch.data(), output_shape, rvv.data(),
+                                 im2col_shape, rvv_im2col.data(),
+                                 /*context=*/nullptr);
+    optimized_ops::HybridConv(params, optimized_scales.data(), input_shape,
+                              input.data(), filter_shape, filter.data(),
+                              bias_shape, bias.data(), accum_scratch_shape,
+                              optimized_scratch.data(), output_shape,
+                              optimized.data(), im2col_shape,
+                              optimized_im2col.data(), /*context=*/nullptr);
+    reference_ops::HybridConvPerChannel(
+        params, reference_scales.data(), input_shape, input.data(),
+        filter_shape, filter.data(), bias_shape, bias.data(), output_shape,
+        expected.data(), im2col_shape, reference_im2col.data(),
+        per_channel_scale.data(), input_offsets.data());
+
+    SCOPED_TRACE(::testing::Message() << "input_depth=" << input_depth);
+    ExpectFloatRelativeNearOrSpecial(scalar, expected, 1e-6f);
+    ExpectFloatRelativeNearOrSpecial(rvv, expected, 1e-6f);
+    ExpectFloatRelativeNearOrSpecial(optimized, expected, 1e-6f);
+  }
+}
+
 TEST(RvvOpsTest, FloatMaxPoolMatchesReferenceAcrossVectorBoundaries) {
   const PoolParams params = MakeFloatPoolParams();
 

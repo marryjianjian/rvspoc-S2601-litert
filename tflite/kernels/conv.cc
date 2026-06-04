@@ -1247,17 +1247,16 @@ TfLiteStatus EvalHybrid(TfLiteContext* context, TfLiteNode* node,
       op_params.float_activation_min = output_activation_min;
       op_params.float_activation_max = output_activation_max;
       if (data->groups == 1) {
-#if defined(TFLITE_RISCV_SCALAR_BASELINE)
-        const int output_depth = GetTensorShape(output).Dims(3);
-        std::vector<float> per_channel_scale(output_depth, 1.0f);
-        std::vector<int32_t> input_offsets(batch_size, 0);
-        reference_ops::HybridConvPerChannel(
+#if defined(TFLITE_RISCV_SCALAR_BASELINE) && defined(__riscv)
+        optimized_ops::RiscvScalarHybridConv(
             op_params, scaling_factors_ptr, GetTensorShape(input),
             quantized_input_ptr_batch, GetTensorShape(filter), filter_data,
             GetTensorShape(bias), GetTensorData<float>(bias),
-            GetTensorShape(output), GetTensorData<float>(output),
-            GetTensorShape(im2col), GetTensorData<int8_t>(im2col),
-            per_channel_scale.data(), input_offsets.data());
+            GetTensorShape(accum_scratch),
+            GetTensorData<int32_t>(accum_scratch), GetTensorShape(output),
+            GetTensorData<float>(output), GetTensorShape(im2col),
+            GetTensorData<int8_t>(im2col),
+            CpuBackendContext::GetFromContext(context));
 #else
         optimized_ops::HybridConv(
             op_params, scaling_factors_ptr, GetTensorShape(input),
