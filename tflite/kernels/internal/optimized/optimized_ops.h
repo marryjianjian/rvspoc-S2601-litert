@@ -9644,7 +9644,8 @@ inline void ArgMax(const RuntimeShape& input1_shape, const T1* input1_data,
   ArgMax(input1_shape, input1_data, input2_data, output_shape, output_data);
 }
 
-inline TfLiteStatus Conv3D(
+template <bool force_scalar_gemm, bool pack_filter_as_row_major>
+inline TfLiteStatus Conv3DImpl(
     const Conv3DParams& params, const RuntimeShape& input_shape,
     const float* input_data, const RuntimeShape& filter_shape,
     const float* filter_data, const RuntimeShape& bias_shape,
@@ -9702,10 +9703,22 @@ inline TfLiteStatus Conv3D(
   int n = output_shape.Dims(4);
   int k = gemm_input_shape->Dims(gemm_input_dims - 1);
 
+  std::vector<float> packed_filter_data;
+  const float* gemm_filter_data = filter_data;
   cpu_backend_gemm::MatrixParams<float> lhs_params;
   lhs_params.order = cpu_backend_gemm::Order::kColMajor;
   lhs_params.rows = n;
   lhs_params.cols = k;
+  if constexpr (pack_filter_as_row_major) {
+    packed_filter_data.resize(n * k);
+    for (int row = 0; row < n; ++row) {
+      for (int col = 0; col < k; ++col) {
+        packed_filter_data[row * k + col] = filter_data[col * n + row];
+      }
+    }
+    gemm_filter_data = packed_filter_data.data();
+    lhs_params.order = cpu_backend_gemm::Order::kRowMajor;
+  }
   cpu_backend_gemm::MatrixParams<float> rhs_params;
   rhs_params.order = cpu_backend_gemm::Order::kColMajor;
   rhs_params.rows = k;
@@ -9718,10 +9731,74 @@ inline TfLiteStatus Conv3D(
   gemm_params.bias = bias_data;
   gemm_params.clamp_min = output_activation_min;
   gemm_params.clamp_max = output_activation_max;
-  cpu_backend_gemm::Gemm(lhs_params, filter_data, rhs_params, gemm_input_data,
-                         dst_params, output_data, gemm_params,
-                         cpu_backend_context);
+  if constexpr (force_scalar_gemm) {
+    if (!cpu_backend_gemm::detail::ScalarGemm(
+            lhs_params, gemm_filter_data, rhs_params, gemm_input_data,
+            dst_params, output_data, gemm_params)) {
+      return kTfLiteError;
+    }
+  } else {
+    cpu_backend_gemm::Gemm(lhs_params, gemm_filter_data, rhs_params,
+                           gemm_input_data, dst_params, output_data, gemm_params,
+                           cpu_backend_context);
+  }
   return kTfLiteOk;
+}
+
+#if defined(__riscv)
+inline TfLiteStatus RiscvScalarConv3D(
+    const Conv3DParams& params, const RuntimeShape& input_shape,
+    const float* input_data, const RuntimeShape& filter_shape,
+    const float* filter_data, const RuntimeShape& bias_shape,
+    const float* bias_data, const RuntimeShape& output_shape,
+    float* output_data, const RuntimeShape& im2col_shape, float* im2col_data,
+    CpuBackendContext* cpu_backend_context) {
+  ruy::profiler::ScopeLabel label("Conv3D/RISCVScalar");
+  return Conv3DImpl<true, false>(
+      params, input_shape, input_data, filter_shape, filter_data, bias_shape,
+      bias_data, output_shape, output_data, im2col_shape, im2col_data,
+      cpu_backend_context);
+}
+#endif  // defined(__riscv)
+
+#ifdef USE_RVV
+inline TfLiteStatus RvvConv3D(
+    const Conv3DParams& params, const RuntimeShape& input_shape,
+    const float* input_data, const RuntimeShape& filter_shape,
+    const float* filter_data, const RuntimeShape& bias_shape,
+    const float* bias_data, const RuntimeShape& output_shape,
+    float* output_data, const RuntimeShape& im2col_shape, float* im2col_data,
+    CpuBackendContext* cpu_backend_context) {
+  ruy::profiler::ScopeLabel label("Conv3D/RVV");
+  return Conv3DImpl<false, true>(
+      params, input_shape, input_data, filter_shape, filter_data, bias_shape,
+      bias_data, output_shape, output_data, im2col_shape, im2col_data,
+      cpu_backend_context);
+}
+#endif  // USE_RVV
+
+inline TfLiteStatus Conv3D(
+    const Conv3DParams& params, const RuntimeShape& input_shape,
+    const float* input_data, const RuntimeShape& filter_shape,
+    const float* filter_data, const RuntimeShape& bias_shape,
+    const float* bias_data, const RuntimeShape& output_shape,
+    float* output_data, const RuntimeShape& im2col_shape, float* im2col_data,
+    CpuBackendContext* cpu_backend_context) {
+#ifdef USE_RVV
+  return RvvConv3D(params, input_shape, input_data, filter_shape, filter_data,
+                   bias_shape, bias_data, output_shape, output_data,
+                   im2col_shape, im2col_data, cpu_backend_context);
+#elif defined(__riscv)
+  return RiscvScalarConv3D(params, input_shape, input_data, filter_shape,
+                           filter_data, bias_shape, bias_data, output_shape,
+                           output_data, im2col_shape, im2col_data,
+                           cpu_backend_context);
+#else
+  return Conv3DImpl<false, false>(
+      params, input_shape, input_data, filter_shape, filter_data, bias_shape,
+      bias_data, output_shape, output_data, im2col_shape, im2col_data,
+      cpu_backend_context);
+#endif
 }
 
 // Returns in 'im_data' (assumed to be zero-initialized) image patch in storage
@@ -9800,7 +9877,8 @@ void BiasAdd3D(T* im_data, const T* bias_data, const RuntimeShape& input_shape,
   }
 }
 
-inline void Conv3DTranspose(
+template <bool force_scalar_gemm>
+inline void Conv3DTransposeImpl(
     const Conv3DTransposeParams& params, const RuntimeShape& input_shape,
     const float* input_data, const RuntimeShape& filter_shape,
     const float* filter_data, const RuntimeShape& bias_shape,
@@ -9862,9 +9940,15 @@ inline void Conv3DTranspose(
     dst_params.rows = filter_total_size;
     dst_params.cols = input_spatial_size;
     cpu_backend_gemm::GemmParams<float, float> gemm_params;
-    cpu_backend_gemm::Gemm(lhs_params, filter_data, rhs_params,
-                           input_data + input_offset * i, dst_params,
-                           col2im_data, gemm_params, cpu_backend_context);
+    if constexpr (force_scalar_gemm) {
+      cpu_backend_gemm::detail::ScalarGemm(
+          lhs_params, filter_data, rhs_params, input_data + input_offset * i,
+          dst_params, col2im_data, gemm_params);
+    } else {
+      cpu_backend_gemm::Gemm(lhs_params, filter_data, rhs_params,
+                             input_data + input_offset * i, dst_params,
+                             col2im_data, gemm_params, cpu_backend_context);
+    }
 
     Col2im(col2im_data, output_channel, output_spatial_dim_1,
            output_spatial_dim_2, output_spatial_dim_3, filter_spatial_dim_1,
@@ -9879,6 +9963,62 @@ inline void Conv3DTranspose(
   output_data_p = output_data;
   BiasAdd3D(output_data_p, bias_data, output_shape, params.float_activation_min,
             params.float_activation_max);
+}
+
+#if defined(__riscv)
+inline void RiscvScalarConv3DTranspose(
+    const Conv3DTransposeParams& params, const RuntimeShape& input_shape,
+    const float* input_data, const RuntimeShape& filter_shape,
+    const float* filter_data, const RuntimeShape& bias_shape,
+    const float* bias_data, const RuntimeShape& output_shape,
+    float* const output_data, const RuntimeShape& col2im_shape,
+    float* col2im_data, CpuBackendContext* cpu_backend_context) {
+  ruy::profiler::ScopeLabel label("Conv3DTranspose/RISCVScalar");
+  Conv3DTransposeImpl<true>(params, input_shape, input_data, filter_shape,
+                            filter_data, bias_shape, bias_data, output_shape,
+                            output_data, col2im_shape, col2im_data,
+                            cpu_backend_context);
+}
+#endif  // defined(__riscv)
+
+#ifdef USE_RVV
+inline void RvvConv3DTranspose(
+    const Conv3DTransposeParams& params, const RuntimeShape& input_shape,
+    const float* input_data, const RuntimeShape& filter_shape,
+    const float* filter_data, const RuntimeShape& bias_shape,
+    const float* bias_data, const RuntimeShape& output_shape,
+    float* const output_data, const RuntimeShape& col2im_shape,
+    float* col2im_data, CpuBackendContext* cpu_backend_context) {
+  ruy::profiler::ScopeLabel label("Conv3DTranspose/RVV");
+  Conv3DTransposeImpl<false>(params, input_shape, input_data, filter_shape,
+                             filter_data, bias_shape, bias_data, output_shape,
+                             output_data, col2im_shape, col2im_data,
+                             cpu_backend_context);
+}
+#endif  // USE_RVV
+
+inline void Conv3DTranspose(
+    const Conv3DTransposeParams& params, const RuntimeShape& input_shape,
+    const float* input_data, const RuntimeShape& filter_shape,
+    const float* filter_data, const RuntimeShape& bias_shape,
+    const float* bias_data, const RuntimeShape& output_shape,
+    float* const output_data, const RuntimeShape& col2im_shape,
+    float* col2im_data, CpuBackendContext* cpu_backend_context) {
+#ifdef USE_RVV
+  RvvConv3DTranspose(params, input_shape, input_data, filter_shape, filter_data,
+                     bias_shape, bias_data, output_shape, output_data,
+                     col2im_shape, col2im_data, cpu_backend_context);
+#elif defined(__riscv)
+  RiscvScalarConv3DTranspose(params, input_shape, input_data, filter_shape,
+                             filter_data, bias_shape, bias_data, output_shape,
+                             output_data, col2im_shape, col2im_data,
+                             cpu_backend_context);
+#else
+  Conv3DTransposeImpl<false>(params, input_shape, input_data, filter_shape,
+                             filter_data, bias_shape, bias_data, output_shape,
+                             output_data, col2im_shape, col2im_data,
+                             cpu_backend_context);
+#endif
 }
 
 // Worker for summing up within a single interval. Interval is identified by

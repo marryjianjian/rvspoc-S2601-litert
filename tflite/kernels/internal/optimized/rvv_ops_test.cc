@@ -44,6 +44,8 @@ limitations under the License.
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/add.h"
 #include "tflite/kernels/internal/reference/conv.h"
+#include "tflite/kernels/internal/reference/conv3d.h"
+#include "tflite/kernels/internal/reference/conv3d_transpose.h"
 #include "tflite/kernels/internal/reference/depthwiseconv_float.h"
 #include "tflite/kernels/internal/reference/depthwiseconv_uint8.h"
 #include "tflite/kernels/internal/reference/div.h"
@@ -2096,6 +2098,174 @@ TEST(RvvOpsTest, HybridConvRiscvScalarAndRvvMatchReference) {
     ExpectFloatRelativeNearOrSpecial(scalar, expected, 1e-6f);
     ExpectFloatRelativeNearOrSpecial(rvv, expected, 1e-6f);
     ExpectFloatRelativeNearOrSpecial(optimized, expected, 1e-6f);
+  }
+}
+
+TEST(RvvOpsTest, Conv3DRiscvScalarAndRvvMatchReference) {
+  Conv3DParams params;
+  params.padding_values.width = 0;
+  params.padding_values.height = 1;
+  params.padding_values.depth = 0;
+  params.padding_values.width_offset = 0;
+  params.padding_values.height_offset = 0;
+  params.padding_values.depth_offset = 0;
+  params.stride_width = 2;
+  params.stride_height = 2;
+  params.stride_depth = 1;
+  params.dilation_width = 1;
+  params.dilation_height = 1;
+  params.dilation_depth = 1;
+  params.float_activation_min = -4.0f;
+  params.float_activation_max = 4.0f;
+  constexpr int kBatches = 1;
+  constexpr int kInputDepth = 4;
+  constexpr int kInputHeight = 5;
+  constexpr int kInputWidth = 6;
+  constexpr int kFilterDepth = 2;
+  constexpr int kFilterHeight = 3;
+  constexpr int kFilterWidth = 2;
+  constexpr int kOutputDepth = 3;
+  constexpr int kOutputHeight = 3;
+  constexpr int kOutputWidth = 3;
+  constexpr int kOutputChannels = 5;
+  const RuntimeShape bias_shape({kOutputChannels});
+  const std::vector<float> bias = {-0.5f, 0.25f, 0.0f, 0.75f, -0.125f};
+  CpuBackendContext cpu_backend_context;
+  cpu_backend_context.SetMaxNumThreads(1);
+
+  for (int input_channels : Float32M4VectorLengths()) {
+    if (input_channels == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape(
+        {kBatches, kInputDepth, kInputHeight, kInputWidth, input_channels});
+    const RuntimeShape filter_shape({kFilterDepth, kFilterHeight,
+                                     kFilterWidth, input_channels,
+                                     kOutputChannels});
+    const RuntimeShape output_shape({kBatches, kOutputDepth, kOutputHeight,
+                                     kOutputWidth, kOutputChannels});
+    const RuntimeShape im2col_shape(
+        {kBatches, kOutputDepth, kOutputHeight, kOutputWidth,
+         kFilterDepth * kFilterHeight * kFilterWidth * input_channels});
+    const std::vector<float> input =
+        MakeInput(input_shape.FlatSize(), 0.125f);
+    const std::vector<float> filter =
+        MakeInput(filter_shape.FlatSize(), -0.25f);
+    std::vector<float> scalar_im2col(im2col_shape.FlatSize());
+    std::vector<float> rvv_im2col(im2col_shape.FlatSize());
+    std::vector<float> optimized_im2col(im2col_shape.FlatSize());
+    std::vector<float> scalar(output_shape.FlatSize());
+    std::vector<float> rvv(output_shape.FlatSize());
+    std::vector<float> optimized(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    ASSERT_EQ(optimized_ops::RiscvScalarConv3D(
+                  params, input_shape, input.data(), filter_shape,
+                  filter.data(), bias_shape, bias.data(), output_shape,
+                  scalar.data(), im2col_shape, scalar_im2col.data(),
+                  &cpu_backend_context),
+              kTfLiteOk);
+    ASSERT_EQ(optimized_ops::RvvConv3D(
+                  params, input_shape, input.data(), filter_shape,
+                  filter.data(), bias_shape, bias.data(), output_shape,
+                  rvv.data(), im2col_shape, rvv_im2col.data(),
+                  &cpu_backend_context),
+              kTfLiteOk);
+    ASSERT_EQ(optimized_ops::Conv3D(
+                  params, input_shape, input.data(), filter_shape,
+                  filter.data(), bias_shape, bias.data(), output_shape,
+                  optimized.data(), im2col_shape, optimized_im2col.data(),
+                  &cpu_backend_context),
+              kTfLiteOk);
+    reference_ops::Conv3D(params, input_shape, input.data(), filter_shape,
+                          filter.data(), bias_shape, bias.data(), output_shape,
+                          expected.data());
+
+    SCOPED_TRACE(::testing::Message() << "input_channels=" << input_channels);
+    ExpectFloatRelativeNearOrSpecial(scalar, expected, 1e-5f);
+    ExpectFloatRelativeNearOrSpecial(rvv, expected, 1e-5f);
+    ExpectFloatRelativeNearOrSpecial(optimized, expected, 1e-5f);
+  }
+}
+
+TEST(RvvOpsTest, Conv3DTransposeRiscvScalarAndRvvMatchReference) {
+  Conv3DTransposeParams params;
+  params.padding_values.width = 0;
+  params.padding_values.height = 0;
+  params.padding_values.depth = 0;
+  params.padding_values.width_offset = 0;
+  params.padding_values.height_offset = 0;
+  params.padding_values.depth_offset = 0;
+  params.stride_width = 2;
+  params.stride_height = 2;
+  params.stride_depth = 2;
+  params.dilation_width = 1;
+  params.dilation_height = 1;
+  params.dilation_depth = 1;
+  params.float_activation_min = -6.0f;
+  params.float_activation_max = 6.0f;
+  constexpr int kBatches = 1;
+  constexpr int kInputDepth = 2;
+  constexpr int kInputHeight = 3;
+  constexpr int kInputWidth = 2;
+  constexpr int kFilterDepth = 2;
+  constexpr int kFilterHeight = 2;
+  constexpr int kFilterWidth = 2;
+  constexpr int kOutputDepth = 4;
+  constexpr int kOutputHeight = 6;
+  constexpr int kOutputWidth = 4;
+  constexpr int kOutputChannels = 5;
+  const RuntimeShape bias_shape({kOutputChannels});
+  const std::vector<float> bias = {-0.25f, 0.0f, 0.5f, -0.75f, 0.125f};
+  CpuBackendContext cpu_backend_context;
+  cpu_backend_context.SetMaxNumThreads(1);
+
+  for (int input_channels : Float32M4VectorLengths()) {
+    if (input_channels == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape(
+        {kBatches, kInputDepth, kInputHeight, kInputWidth, input_channels});
+    const RuntimeShape filter_shape({kFilterDepth, kFilterHeight,
+                                     kFilterWidth, kOutputChannels,
+                                     input_channels});
+    const RuntimeShape output_shape({kBatches, kOutputDepth, kOutputHeight,
+                                     kOutputWidth, kOutputChannels});
+    const RuntimeShape col2im_shape(
+        {kInputDepth * kInputHeight * kInputWidth,
+         kFilterDepth * kFilterHeight * kFilterWidth * kOutputChannels});
+    const std::vector<float> input =
+        MakeInput(input_shape.FlatSize(), -0.375f);
+    const std::vector<float> filter =
+        MakeInput(filter_shape.FlatSize(), 0.25f);
+    std::vector<float> scalar_col2im(col2im_shape.FlatSize());
+    std::vector<float> rvv_col2im(col2im_shape.FlatSize());
+    std::vector<float> optimized_col2im(col2im_shape.FlatSize());
+    std::vector<float> scalar(output_shape.FlatSize());
+    std::vector<float> rvv(output_shape.FlatSize());
+    std::vector<float> optimized(output_shape.FlatSize());
+    std::vector<float> expected(output_shape.FlatSize());
+
+    optimized_ops::RiscvScalarConv3DTranspose(
+        params, input_shape, input.data(), filter_shape, filter.data(),
+        bias_shape, bias.data(), output_shape, scalar.data(), col2im_shape,
+        scalar_col2im.data(), &cpu_backend_context);
+    optimized_ops::RvvConv3DTranspose(
+        params, input_shape, input.data(), filter_shape, filter.data(),
+        bias_shape, bias.data(), output_shape, rvv.data(), col2im_shape,
+        rvv_col2im.data(), &cpu_backend_context);
+    optimized_ops::Conv3DTranspose(
+        params, input_shape, input.data(), filter_shape, filter.data(),
+        bias_shape, bias.data(), output_shape, optimized.data(), col2im_shape,
+        optimized_col2im.data(), &cpu_backend_context);
+    reference_ops::Conv3DTranspose(params, input_shape, input.data(),
+                                   filter_shape, filter.data(), bias_shape,
+                                   bias.data(), output_shape, expected.data());
+
+    SCOPED_TRACE(::testing::Message() << "input_channels=" << input_channels);
+    ExpectFloatRelativeNearOrSpecial(scalar, expected, 1e-5f);
+    ExpectFloatRelativeNearOrSpecial(rvv, expected, 1e-5f);
+    ExpectFloatRelativeNearOrSpecial(optimized, expected, 1e-5f);
   }
 }
 
