@@ -20,6 +20,7 @@ limitations under the License.
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 #include "tflite/kernels/cpu_backend_gemm.h"
@@ -2549,6 +2550,112 @@ TEST(RvvOpsTest, FloatSoftmaxMatchesReferenceAcrossVectorBoundaries) {
     SCOPED_TRACE(::testing::Message() << "depth=" << depth);
     ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
+}
+
+TEST(RvvOpsTest, FloatLogSoftmaxRiscvScalarAndRvvMatchReference) {
+  SoftmaxParams params;
+  constexpr int kBatchSize = 3;
+
+  for (int depth : Float32M4VectorLengths()) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape shape({kBatchSize, depth});
+    std::vector<float> input = MakeInput(kBatchSize * depth, -0.625f);
+    if (!input.empty()) {
+      input[0] = std::numeric_limits<float>::lowest();
+      input[input.size() / 2] = 0.0f;
+      input[input.size() - 1] = std::numeric_limits<float>::max() / 4.0f;
+    }
+    std::vector<float> scalar(kBatchSize * depth);
+    std::vector<float> rvv(kBatchSize * depth);
+    std::vector<float> optimized(kBatchSize * depth);
+    std::vector<float> expected(kBatchSize * depth);
+
+    optimized_ops::RiscvScalarLogSoftmaxFloat(
+        params, kBatchSize, depth, input.data(), scalar.data());
+    optimized_ops::RvvLogSoftmaxFloat(params, kBatchSize, depth, input.data(),
+                                      rvv.data());
+    optimized_ops::LogSoftmax(params, shape, input.data(), shape,
+                              optimized.data());
+    reference_ops::LogSoftmax(params, shape, input.data(), shape,
+                              expected.data());
+
+    SCOPED_TRACE(::testing::Message() << "depth=" << depth);
+    ExpectFloatRelativeNearOrSpecial(scalar, expected, 1e-6f);
+    ExpectFloatRelativeNearOrSpecial(rvv, expected, 1e-6f);
+    ExpectFloatRelativeNearOrSpecial(optimized, expected, 1e-6f);
+  }
+}
+
+template <typename T>
+SoftmaxParams MakeQuantizedLogSoftmaxParams(float* table) {
+  SoftmaxParams params;
+  params.zero_point = std::is_same<T, int8_t>::value ? 127 : 255;
+  params.scale = 16.0f / 256.0f;
+  params.table = table;
+  optimized_ops::PopulateSoftmaxLookupTable(&params, 0.03125f, 1.0f);
+  return params;
+}
+
+template <typename T>
+std::vector<T> MakeQuantizedLogSoftmaxInput(int size, int offset) {
+  std::vector<T> input(size);
+  for (int i = 0; i < size; ++i) {
+    if constexpr (std::is_same<T, int8_t>::value) {
+      input[i] = static_cast<int8_t>(((i + offset) * 37 + 11) % 256 - 128);
+    } else {
+      input[i] = static_cast<uint8_t>(((i + offset) * 37 + 11) % 256);
+    }
+  }
+  if (size > 0) {
+    input[0] = std::numeric_limits<T>::min();
+    input[size / 2] = static_cast<T>(0);
+    input[size - 1] = std::numeric_limits<T>::max();
+  }
+  return input;
+}
+
+template <typename T>
+void ExpectQuantizedLogSoftmaxRiscvScalarAndRvvMatchOptimized(
+    const std::vector<int>& depths, int input_offset) {
+  constexpr int kBatchSize = 3;
+  float table[256];
+  SoftmaxParams params = MakeQuantizedLogSoftmaxParams<T>(table);
+  constexpr float kInputScale = 0.03125f;
+
+  for (int depth : depths) {
+    if (depth == 0) {
+      continue;
+    }
+    const RuntimeShape shape({kBatchSize, depth});
+    const std::vector<T> input =
+        MakeQuantizedLogSoftmaxInput<T>(kBatchSize * depth, input_offset);
+    std::vector<T> scalar(kBatchSize * depth);
+    std::vector<T> rvv(kBatchSize * depth);
+    std::vector<T> optimized(kBatchSize * depth);
+
+    optimized_ops::RiscvScalarLogSoftmaxQuantized(
+        params, kInputScale, kBatchSize, depth, input.data(), scalar.data());
+    optimized_ops::RvvLogSoftmaxQuantized(params, kInputScale, kBatchSize,
+                                          depth, input.data(), rvv.data());
+    optimized_ops::LogSoftmax(params, kInputScale, shape, input.data(), shape,
+                              optimized.data());
+
+    SCOPED_TRACE(::testing::Message() << "depth=" << depth);
+    EXPECT_THAT(rvv, ElementsAreArray(scalar));
+    EXPECT_THAT(optimized, ElementsAreArray(scalar));
+  }
+}
+
+TEST(RvvOpsTest, Int8LogSoftmaxRiscvScalarAndRvvMatchOptimized) {
+  ExpectQuantizedLogSoftmaxRiscvScalarAndRvvMatchOptimized<int8_t>(
+      Int8M1VectorLengths(), 5);
+}
+
+TEST(RvvOpsTest, Uint8LogSoftmaxRiscvScalarAndRvvMatchOptimized) {
+  ExpectQuantizedLogSoftmaxRiscvScalarAndRvvMatchOptimized<uint8_t>(
+      Int8M1VectorLengths(), 19);
 }
 
 TEST(RvvOpsTest, FloatDivElementwiseMatchesReferenceAcrossVectorBoundaries) {

@@ -4333,6 +4333,202 @@ inline int32_t QuantizeSoftmaxOutput<uint8_t>(float prob_rescaled,
 }
 #endif
 
+#if defined(__riscv)
+inline void RiscvScalarLogSoftmaxFloat(const SoftmaxParams& params,
+                                       int outer_size, int depth,
+                                       const float* input_data,
+                                       float* output_data) {
+  (void)params;
+  for (int i = 0; i < outer_size; ++i) {
+    const float* input_row = input_data + i * depth;
+    float* output_row = output_data + i * depth;
+
+    float max = std::numeric_limits<float>::lowest();
+    for (int c = 0; c < depth; ++c) {
+      max = std::max(max, input_row[c]);
+    }
+
+    float sum = 0.0f;
+    for (int c = 0; c < depth; ++c) {
+      sum += std::exp(input_row[c] - max);
+    }
+
+    const float log_sum = std::log(sum);
+    for (int c = 0; c < depth; ++c) {
+      output_row[c] = input_row[c] - max - log_sum;
+    }
+  }
+}
+
+template <typename T>
+inline void RiscvScalarLogSoftmaxQuantized(const SoftmaxParams& params,
+                                           float input_scale, int outer_size,
+                                           int depth, const T* input_data,
+                                           T* output_data) {
+  const int32_t clamp_max = std::numeric_limits<T>::max();
+  const int32_t clamp_min = std::numeric_limits<T>::min();
+  const float scale = input_scale / params.scale;
+  const int32_t max_uint8 = std::numeric_limits<uint8_t>::max();
+
+  for (int i = 0; i < outer_size; ++i) {
+    const T* input_row = input_data + i * depth;
+    T* output_row = output_data + i * depth;
+
+    T max_val = std::numeric_limits<T>::min();
+    for (int j = 0; j < depth; ++j) {
+      max_val = std::max(max_val, input_row[j]);
+    }
+
+    float sum_exp = 0.0f;
+    const float* table_offset = &params.table[max_uint8 - max_val];
+    for (int j = 0; j < depth; ++j) {
+      sum_exp += table_offset[input_row[j]];
+    }
+
+    const float log_sum_exp = std::log(sum_exp);
+    const float precomputed =
+        (input_scale * max_val + log_sum_exp) / params.scale;
+    for (int j = 0; j < depth; ++j) {
+      const float log_prob = scale * input_row[j] - precomputed;
+      const int32_t prob_quantized = std::rint(log_prob) + params.zero_point;
+      output_row[j] = static_cast<T>(
+          std::max(std::min(clamp_max, prob_quantized), clamp_min));
+    }
+  }
+}
+#endif  // defined(__riscv)
+
+#ifdef USE_RVV
+inline float RvvReduceMaxFloat(const float* input_data, int size) {
+  vfloat32m1_t reduced =
+      __riscv_vfmv_v_f_f32m1(std::numeric_limits<float>::lowest(), 1);
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    const vfloat32m4_t input = __riscv_vle32_v_f32m4(input_data + i, vl);
+    reduced = __riscv_vfredmax_vs_f32m4_f32m1(input, reduced, vl);
+    i += vl;
+  }
+  return __riscv_vfmv_f_s_f32m1_f32(reduced);
+}
+
+inline float RvvReduceSumFloat(vfloat32m4_t values, size_t vl) {
+  vfloat32m1_t reduced = __riscv_vfmv_v_f_f32m1(0.0f, 1);
+  reduced = __riscv_vfredusum_vs_f32m4_f32m1(values, reduced, vl);
+  return __riscv_vfmv_f_s_f32m1_f32(reduced);
+}
+
+inline void RvvLogSoftmaxFloat(const SoftmaxParams& params, int outer_size,
+                               int depth, const float* input_data,
+                               float* output_data) {
+  (void)params;
+  for (int i = 0; i < outer_size; ++i) {
+    const float* input_row = input_data + i * depth;
+    float* output_row = output_data + i * depth;
+
+    const float max = RvvReduceMaxFloat(input_row, depth);
+    float sum = 0.0f;
+    for (int c = 0; c < depth; ++c) {
+      sum += std::exp(input_row[c] - max);
+    }
+
+    const float max_plus_log_sum = max + std::log(sum);
+    for (int c = 0; c < depth;) {
+      const size_t vl = __riscv_vsetvl_e32m4(depth - c);
+      vfloat32m4_t input = __riscv_vle32_v_f32m4(input_row + c, vl);
+      input = __riscv_vfsub_vf_f32m4(input, max_plus_log_sum, vl);
+      __riscv_vse32_v_f32m4(output_row + c, input, vl);
+      c += vl;
+    }
+  }
+}
+
+template <typename T>
+inline vint32m4_t RvvLoadQuantizedLogSoftmaxInput(const T* input, size_t vl) {
+  if constexpr (std::is_same<T, int8_t>::value) {
+    const vint8m1_t input_i8 = __riscv_vle8_v_i8m1(input, vl);
+    const vint16m2_t input_i16 = __riscv_vsext_vf2_i16m2(input_i8, vl);
+    return __riscv_vsext_vf2_i32m4(input_i16, vl);
+  } else {
+    const vuint8m1_t input_u8 = __riscv_vle8_v_u8m1(input, vl);
+    const vuint16m2_t input_u16 = __riscv_vzext_vf2_u16m2(input_u8, vl);
+    return __riscv_vreinterpret_v_u32m4_i32m4(
+        __riscv_vzext_vf2_u32m4(input_u16, vl));
+  }
+}
+
+template <typename T>
+inline int32_t RvvReduceMaxQuantizedLogSoftmaxInput(const T* input_data,
+                                                    int size) {
+  vint32m1_t reduced =
+      __riscv_vmv_v_x_i32m1(std::numeric_limits<int32_t>::min(), 1);
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vint32m4_t input =
+        RvvLoadQuantizedLogSoftmaxInput(input_data + i, vl);
+    reduced = __riscv_vredmax_vs_i32m4_i32m1(input, reduced, vl);
+    i += vl;
+  }
+  return __riscv_vmv_x_s_i32m1_i32(reduced);
+}
+
+template <typename T>
+inline void RvvLogSoftmaxQuantized(const SoftmaxParams& params,
+                                   float input_scale, int outer_size,
+                                   int depth, const T* input_data,
+                                   T* output_data) {
+  constexpr unsigned kRoundToNearestTiesToEven = 0;
+  const int32_t clamp_max = std::numeric_limits<T>::max();
+  const int32_t clamp_min = std::numeric_limits<T>::min();
+  const float scale = input_scale / params.scale;
+  const int32_t max_uint8 = std::numeric_limits<uint8_t>::max();
+
+  for (int i = 0; i < outer_size; ++i) {
+    const T* input_row = input_data + i * depth;
+    T* output_row = output_data + i * depth;
+
+    const int32_t max_val =
+        RvvReduceMaxQuantizedLogSoftmaxInput(input_row, depth);
+    float sum_exp = 0.0f;
+    const int32_t table_index_offset = max_uint8 - max_val;
+    for (int j = 0; j < depth;) {
+      const size_t vl = __riscv_vsetvl_e8m1(depth - j);
+      vint32m4_t input = RvvLoadQuantizedLogSoftmaxInput(input_row + j, vl);
+      vint32m4_t table_index =
+          __riscv_vadd_vx_i32m4(input, table_index_offset, vl);
+      table_index = __riscv_vsll_vx_i32m4(table_index, 2, vl);
+      const vuint32m4_t table_byte_index =
+          __riscv_vreinterpret_v_i32m4_u32m4(table_index);
+      const vfloat32m4_t values =
+          __riscv_vluxei32_v_f32m4(params.table, table_byte_index, vl);
+      sum_exp += RvvReduceSumFloat(values, vl);
+      j += vl;
+    }
+
+    const float log_sum_exp = std::log(sum_exp);
+    const float precomputed =
+        (input_scale * max_val + log_sum_exp) / params.scale;
+    for (int j = 0; j < depth;) {
+      const size_t vl = __riscv_vsetvl_e8m1(depth - j);
+      const vint32m4_t input_i32 =
+          RvvLoadQuantizedLogSoftmaxInput(input_row + j, vl);
+      vfloat32m4_t log_prob = __riscv_vfcvt_f_x_v_f32m4(input_i32, vl);
+      log_prob = __riscv_vfmul_vf_f32m4(log_prob, scale, vl);
+      log_prob = __riscv_vfsub_vf_f32m4(log_prob, precomputed, vl);
+      vint32m4_t quantized = __riscv_vfcvt_x_f_v_i32m4_rm(
+          log_prob, kRoundToNearestTiesToEven, vl);
+      quantized = __riscv_vadd_vx_i32m4(quantized, params.zero_point, vl);
+      quantized = __riscv_vmax_vx_i32m4(quantized, clamp_min, vl);
+      quantized = __riscv_vmin_vx_i32m4(quantized, clamp_max, vl);
+      const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(quantized, 0, vl);
+      const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+      __riscv_vse8_v_i8m1(reinterpret_cast<int8_t*>(output_row + j),
+                          narrowed_i8, vl);
+      j += vl;
+    }
+  }
+}
+#endif  // USE_RVV
+
 inline void PopulateSoftmaxLookupTable(SoftmaxParams* data, float input_scale,
                                        float beta) {
   const float scale = -input_scale * beta;
@@ -4660,6 +4856,15 @@ inline void LogSoftmax(const SoftmaxParams& params,
   const int depth =
       MatchingDim(input_shape, trailing_dim, output_shape, trailing_dim);
 
+#ifdef USE_RVV
+  RvvLogSoftmaxFloat(params, outer_size, depth, input_data, output_data);
+  return;
+#elif defined(__riscv)
+  RiscvScalarLogSoftmaxFloat(params, outer_size, depth, input_data,
+                             output_data);
+  return;
+#endif
+
   for (int i = 0; i < outer_size; ++i) {
     VectorMap<const float> block_input(input_data + i * depth, depth, 1);
     VectorMap<float> block_output(output_data + i * depth, depth, 1);
@@ -4706,6 +4911,16 @@ inline void LogSoftmax(const SoftmaxParams& params, float input_scale,
       MatchingFlatSizeSkipDim(input_shape, trailing_dim, output_shape);
   const int last_dim =
       MatchingDim(input_shape, trailing_dim, output_shape, trailing_dim);
+
+#ifdef USE_RVV
+  RvvLogSoftmaxQuantized(params, input_scale, excluding_last_dim, last_dim,
+                         input_data, output_data);
+  return;
+#elif defined(__riscv)
+  RiscvScalarLogSoftmaxQuantized(params, input_scale, excluding_last_dim,
+                                 last_dim, input_data, output_data);
+  return;
+#endif
 
   const int32_t clamp_max = std::numeric_limits<T>::max();
   const int32_t clamp_min = std::numeric_limits<T>::min();
