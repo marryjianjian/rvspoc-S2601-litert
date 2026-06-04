@@ -1652,6 +1652,24 @@ inline bool RiscvDepthwiseConv3x3FilterPerChannelSupported(
          (thread_dim == 0 || thread_dim == 1);
 }
 
+inline bool RiscvDepthwiseConv3x3FilterCommonPerChannelSupported(
+    const DepthwiseParams &params, const int32_t *output_shift,
+    const RuntimeShape &input_shape, const RuntimeShape &filter_shape,
+    const RuntimeShape &bias_shape, const RuntimeShape &output_shape,
+    int thread_dim) {
+  if (!RiscvDepthwiseConv3x3FilterPerChannelSupported(
+          params, input_shape, filter_shape, bias_shape, output_shape,
+          thread_dim)) {
+    return false;
+  }
+  return optimized_ops::depthwise_conv::Fast3x3FilterKernelSupported<
+      optimized_ops::depthwise_conv::QuantizationType::kPerChannelInt8>(
+      input_shape, filter_shape, params.stride_width, params.stride_height,
+      params.dilation_width_factor, params.dilation_height_factor,
+      params.padding_values.width, params.padding_values.height,
+      params.depth_multiplier, output_shape, 0, output_shift);
+}
+
 inline void RiscvScalarDepthwiseConv3x3FilterPerChannel(
     const DepthwiseParams &params, const int32_t *output_multiplier,
     const int32_t *output_shift, const RuntimeShape &input_shape,
@@ -1814,6 +1832,34 @@ inline void RvvDepthwiseConv3x3FilterPerChannel(
       }
     }
   }
+}
+#endif // USE_RVV
+
+inline void RiscvScalarDepthwiseConv3x3FilterCommonPerChannel(
+    const DepthwiseParams &params, const int32_t *output_multiplier,
+    const int32_t *output_shift, const RuntimeShape &input_shape,
+    const int8_t *input_data, const RuntimeShape &filter_shape,
+    const int8_t *filter_data, const RuntimeShape &bias_shape,
+    const int32_t *bias_data, const RuntimeShape &output_shape,
+    int8_t *output_data, int thread_start, int thread_end, int thread_dim) {
+  RiscvScalarDepthwiseConv3x3FilterPerChannel(
+      params, output_multiplier, output_shift, input_shape, input_data,
+      filter_shape, filter_data, bias_shape, bias_data, output_shape,
+      output_data, thread_start, thread_end, thread_dim);
+}
+
+#ifdef USE_RVV
+inline void RvvDepthwiseConv3x3FilterCommonPerChannel(
+    const DepthwiseParams &params, const int32_t *output_multiplier,
+    const int32_t *output_shift, const RuntimeShape &input_shape,
+    const int8_t *input_data, const RuntimeShape &filter_shape,
+    const int8_t *filter_data, const RuntimeShape &bias_shape,
+    const int32_t *bias_data, const RuntimeShape &output_shape,
+    int8_t *output_data, int thread_start, int thread_end, int thread_dim) {
+  RvvDepthwiseConv3x3FilterPerChannel(
+      params, output_multiplier, output_shift, input_shape, input_data,
+      filter_shape, filter_data, bias_shape, bias_data, output_shape,
+      output_data, thread_start, thread_end, thread_dim);
 }
 #endif // USE_RVV
 
@@ -2094,6 +2140,27 @@ inline void DepthwiseConvWithRounding(
 #endif
 
 #if defined(__riscv)
+  if (depthwise_conv::RiscvDepthwiseConv3x3FilterCommonPerChannelSupported(
+          params, output_shift, input_shape, filter_shape, bias_shape,
+          output_shape, thread_dim)) {
+#ifdef USE_RVV
+    ruy::profiler::ScopeLabel specialized_label(
+        "DepthwiseConvInt8/8bit/3x3/Common/RVV");
+    depthwise_conv::RvvDepthwiseConv3x3FilterCommonPerChannel(
+        params, output_multiplier, output_shift, input_shape, input_data,
+        filter_shape, filter_data, bias_shape, bias_data, output_shape,
+        output_data, thread_start, thread_end, thread_dim);
+#else
+    ruy::profiler::ScopeLabel specialized_label(
+        "DepthwiseConvInt8/8bit/3x3/Common/RiscvScalar");
+    depthwise_conv::RiscvScalarDepthwiseConv3x3FilterCommonPerChannel(
+        params, output_multiplier, output_shift, input_shape, input_data,
+        filter_shape, filter_data, bias_shape, bias_data, output_shape,
+        output_data, thread_start, thread_end, thread_dim);
+#endif
+    return;
+  }
+
   if (depthwise_conv::RiscvDepthwiseConv3x3FilterPerChannelSupported(
           params, input_shape, filter_shape, bias_shape, output_shape,
           thread_dim)) {

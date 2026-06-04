@@ -1748,6 +1748,22 @@ inline bool RiscvDepthwiseConv3x3FilterSupported(
          (thread_dim == 0 || thread_dim == 1);
 }
 
+inline bool RiscvDepthwiseConv3x3FilterCommonSupported(
+    const DepthwiseParams &params, const RuntimeShape &input_shape,
+    const RuntimeShape &filter_shape, const RuntimeShape &bias_shape,
+    const RuntimeShape &output_shape, int thread_dim) {
+  if (!RiscvDepthwiseConv3x3FilterSupported(
+          params, input_shape, filter_shape, bias_shape, output_shape,
+          thread_dim)) {
+    return false;
+  }
+  return Fast3x3FilterKernelSupported(
+      input_shape, filter_shape, params.stride_width, params.stride_height,
+      params.dilation_width_factor, params.dilation_height_factor,
+      params.padding_values.width, params.padding_values.height,
+      params.depth_multiplier, output_shape, params.output_shift);
+}
+
 template <DepthwiseConvOutputRounding output_rounding>
 inline void RiscvScalarDepthwiseConv3x3Filter(
     const DepthwiseParams &params, const RuntimeShape &input_shape,
@@ -1919,6 +1935,34 @@ inline void RvvDepthwiseConv3x3Filter(
       }
     }
   }
+}
+#endif // USE_RVV
+
+template <DepthwiseConvOutputRounding output_rounding>
+inline void RiscvScalarDepthwiseConv3x3FilterCommon(
+    const DepthwiseParams &params, const RuntimeShape &input_shape,
+    const uint8_t *input_data, const RuntimeShape &filter_shape,
+    const uint8_t *filter_data, const RuntimeShape &bias_shape,
+    const int32_t *bias_data, const RuntimeShape &output_shape,
+    uint8_t *output_data, int thread_start, int thread_end, int thread_dim) {
+  RiscvScalarDepthwiseConv3x3Filter<output_rounding>(
+      params, input_shape, input_data, filter_shape, filter_data, bias_shape,
+      bias_data, output_shape, output_data, thread_start, thread_end,
+      thread_dim);
+}
+
+#ifdef USE_RVV
+template <DepthwiseConvOutputRounding output_rounding>
+inline void RvvDepthwiseConv3x3FilterCommon(
+    const DepthwiseParams &params, const RuntimeShape &input_shape,
+    const uint8_t *input_data, const RuntimeShape &filter_shape,
+    const uint8_t *filter_data, const RuntimeShape &bias_shape,
+    const int32_t *bias_data, const RuntimeShape &output_shape,
+    uint8_t *output_data, int thread_start, int thread_end, int thread_dim) {
+  RvvDepthwiseConv3x3Filter<output_rounding>(
+      params, input_shape, input_data, filter_shape, filter_data, bias_shape,
+      bias_data, output_shape, output_data, thread_start, thread_end,
+      thread_dim);
 }
 #endif // USE_RVV
 
@@ -2350,6 +2394,27 @@ inline void DepthwiseConvWithRounding(
 #endif
 
 #if defined(__riscv)
+  if (depthwise_conv::RiscvDepthwiseConv3x3FilterCommonSupported(
+          params, input_shape, filter_shape, bias_shape, output_shape,
+          thread_dim)) {
+#ifdef USE_RVV
+    ruy::profiler::ScopeLabel specialized_label(
+        "DepthwiseConv/8bit/3x3/Common/RVV");
+    depthwise_conv::RvvDepthwiseConv3x3FilterCommon<kOutputRounding>(
+        params, input_shape, input_data, filter_shape, filter_data, bias_shape,
+        bias_data, output_shape, output_data, thread_start, thread_end,
+        thread_dim);
+#else
+    ruy::profiler::ScopeLabel specialized_label(
+        "DepthwiseConv/8bit/3x3/Common/RiscvScalar");
+    depthwise_conv::RiscvScalarDepthwiseConv3x3FilterCommon<kOutputRounding>(
+        params, input_shape, input_data, filter_shape, filter_data, bias_shape,
+        bias_data, output_shape, output_data, thread_start, thread_end,
+        thread_dim);
+#endif
+    return;
+  }
+
   if (depthwise_conv::RiscvDepthwiseConv3x3FilterSupported(
           params, input_shape, filter_shape, bias_shape, output_shape,
           thread_dim)) {

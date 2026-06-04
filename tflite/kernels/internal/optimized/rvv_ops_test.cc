@@ -817,6 +817,19 @@ std::vector<int> Int8M1VectorLengths() {
   return VectorLengthsAroundVlmax(static_cast<int>(__riscv_vsetvlmax_e8m1()));
 }
 
+std::vector<int> Int8M1CommonDepths() {
+  std::vector<int> depths = {8, 16};
+  for (int length : Int8M1VectorLengths()) {
+    if (length <= 0) {
+      continue;
+    }
+    depths.push_back(((length + 7) / 8) * 8);
+  }
+  std::sort(depths.begin(), depths.end());
+  depths.erase(std::unique(depths.begin(), depths.end()), depths.end());
+  return depths;
+}
+
 std::vector<int> Int8M4VectorLengths() {
   return VectorLengthsAroundVlmax(static_cast<int>(__riscv_vsetvlmax_e8m4()));
 }
@@ -1553,6 +1566,71 @@ TEST(
 }
 
 TEST(RvvOpsTest,
+     Uint8DepthwiseConv3x3CommonRiscvScalarAndRvvMatchReference) {
+  DepthwiseParams params = MakeUint8DepthwiseConvParams();
+  params.stride_height = 2;
+  params.stride_width = 2;
+  constexpr int kBatches = 1;
+  constexpr int kInputHeight = 5;
+  constexpr int kInputWidth = 7;
+  constexpr int kFilterHeight = 3;
+  constexpr int kFilterWidth = 3;
+  constexpr int kOutputHeight = 3;
+  constexpr int kOutputWidth = 4;
+  CpuBackendContext cpu_backend_context;
+  cpu_backend_context.SetMaxNumThreads(1);
+
+  for (int input_depth : Int8M1CommonDepths()) {
+    const int output_depth = input_depth * params.depth_multiplier;
+    const RuntimeShape input_shape(
+        {kBatches, kInputHeight, kInputWidth, input_depth});
+    const RuntimeShape filter_shape(
+        {1, kFilterHeight, kFilterWidth, output_depth});
+    const RuntimeShape bias_shape({output_depth});
+    const RuntimeShape output_shape(
+        {kBatches, kOutputHeight, kOutputWidth, output_depth});
+    ASSERT_TRUE(
+        optimized_ops::depthwise_conv::
+            RiscvDepthwiseConv3x3FilterCommonSupported(
+                params, input_shape, filter_shape, bias_shape, output_shape,
+                0))
+        << "input_depth=" << input_depth;
+    const std::vector<uint8_t> input =
+        MakeUint8Input(input_shape.FlatSize(), 17);
+    const std::vector<uint8_t> filter =
+        MakeUint8Input(filter_shape.FlatSize(), 89);
+    const std::vector<int32_t> bias = MakeInt32Input(output_depth, 211);
+    std::vector<uint8_t> scalar(output_shape.FlatSize());
+    std::vector<uint8_t> rvv(output_shape.FlatSize());
+    std::vector<uint8_t> optimized(output_shape.FlatSize());
+    std::vector<uint8_t> expected(output_shape.FlatSize());
+
+    optimized_ops::depthwise_conv::
+        RiscvScalarDepthwiseConv3x3FilterCommon<
+            DepthwiseConvOutputRounding::kUpward>(
+            params, input_shape, input.data(), filter_shape, filter.data(),
+            bias_shape, bias.data(), output_shape, scalar.data(), 0, kBatches,
+            0);
+    optimized_ops::depthwise_conv::RvvDepthwiseConv3x3FilterCommon<
+        DepthwiseConvOutputRounding::kUpward>(
+        params, input_shape, input.data(), filter_shape, filter.data(),
+        bias_shape, bias.data(), output_shape, rvv.data(), 0, kBatches, 0);
+    optimized_ops::DepthwiseConv(params, input_shape, input.data(),
+                                 filter_shape, filter.data(), bias_shape,
+                                 bias.data(), output_shape, optimized.data(),
+                                 &cpu_backend_context);
+    reference_ops::DepthwiseConv(params, input_shape, input.data(),
+                                 filter_shape, filter.data(), bias_shape,
+                                 bias.data(), output_shape, expected.data());
+
+    SCOPED_TRACE(::testing::Message() << "input_depth=" << input_depth);
+    EXPECT_THAT(scalar, ElementsAreArray(expected));
+    EXPECT_THAT(rvv, ElementsAreArray(expected));
+    EXPECT_THAT(optimized, ElementsAreArray(expected));
+  }
+}
+
+TEST(RvvOpsTest,
      Int8DepthwiseConvPerChannelMatchesReferenceAcrossVectorBoundaries) {
   const DepthwiseParams params = MakeInt8DepthwiseConvPerChannelParams();
   constexpr int kBatches = 1;
@@ -1662,6 +1740,77 @@ TEST(
         << "input_depth=" << input_depth;
     EXPECT_THAT(actual, ElementsAreArray(expected))
         << "input_depth=" << input_depth;
+  }
+}
+
+TEST(RvvOpsTest,
+     Int8DepthwiseConv3x3CommonRiscvScalarAndRvvMatchReference) {
+  DepthwiseParams params = MakeInt8DepthwiseConvPerChannelParams();
+  params.stride_height = 2;
+  params.stride_width = 2;
+  constexpr int kBatches = 1;
+  constexpr int kInputHeight = 5;
+  constexpr int kInputWidth = 7;
+  constexpr int kFilterHeight = 3;
+  constexpr int kFilterWidth = 3;
+  constexpr int kOutputHeight = 3;
+  constexpr int kOutputWidth = 4;
+  CpuBackendContext cpu_backend_context;
+  cpu_backend_context.SetMaxNumThreads(1);
+
+  for (int input_depth : Int8M1CommonDepths()) {
+    const int output_depth = input_depth * params.depth_multiplier;
+    const RuntimeShape input_shape(
+        {kBatches, kInputHeight, kInputWidth, input_depth});
+    const RuntimeShape filter_shape(
+        {1, kFilterHeight, kFilterWidth, output_depth});
+    const RuntimeShape bias_shape({output_depth});
+    const RuntimeShape output_shape(
+        {kBatches, kOutputHeight, kOutputWidth, output_depth});
+    const std::vector<int8_t> input = MakeInt8Input(input_shape.FlatSize(), 31);
+    const std::vector<int8_t> filter =
+        MakeInt8Input(filter_shape.FlatSize(), 127);
+    const std::vector<int32_t> bias = MakeInt32Input(output_depth, 223);
+    std::vector<int32_t> output_multiplier(output_depth);
+    std::vector<int32_t> output_shift(output_depth);
+    for (int i = 0; i < output_depth; ++i) {
+      output_multiplier[i] = 1073741824 + (i % 3) * 33554432;
+      output_shift[i] = -3 - (i % 3);
+    }
+    ASSERT_TRUE(
+        optimized_integer_ops::depthwise_conv::
+            RiscvDepthwiseConv3x3FilterCommonPerChannelSupported(
+                params, output_shift.data(), input_shape, filter_shape,
+                bias_shape, output_shape, 0))
+        << "input_depth=" << input_depth;
+    std::vector<int8_t> scalar(output_shape.FlatSize());
+    std::vector<int8_t> rvv(output_shape.FlatSize());
+    std::vector<int8_t> optimized(output_shape.FlatSize());
+    std::vector<int8_t> expected(output_shape.FlatSize());
+
+    optimized_integer_ops::depthwise_conv::
+        RiscvScalarDepthwiseConv3x3FilterCommonPerChannel(
+            params, output_multiplier.data(), output_shift.data(), input_shape,
+            input.data(), filter_shape, filter.data(), bias_shape, bias.data(),
+            output_shape, scalar.data(), 0, kBatches, 0);
+    optimized_integer_ops::depthwise_conv::
+        RvvDepthwiseConv3x3FilterCommonPerChannel(
+            params, output_multiplier.data(), output_shift.data(), input_shape,
+            input.data(), filter_shape, filter.data(), bias_shape, bias.data(),
+            output_shape, rvv.data(), 0, kBatches, 0);
+    optimized_integer_ops::DepthwiseConvPerChannel(
+        params, output_multiplier.data(), output_shift.data(), input_shape,
+        input.data(), filter_shape, filter.data(), bias_shape, bias.data(),
+        output_shape, optimized.data(), &cpu_backend_context);
+    reference_integer_ops::DepthwiseConvPerChannel(
+        params, output_multiplier.data(), output_shift.data(), input_shape,
+        input.data(), filter_shape, filter.data(), bias_shape, bias.data(),
+        output_shape, expected.data());
+
+    SCOPED_TRACE(::testing::Message() << "input_depth=" << input_depth);
+    EXPECT_THAT(scalar, ElementsAreArray(expected));
+    EXPECT_THAT(rvv, ElementsAreArray(expected));
+    EXPECT_THAT(optimized, ElementsAreArray(expected));
   }
 }
 
