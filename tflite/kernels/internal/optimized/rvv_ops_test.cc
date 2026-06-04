@@ -78,6 +78,34 @@ TfLiteRegistration *Register_STABLEHLO_MULTIPLY();
 TfLiteRegistration *Register_STABLEHLO_MAXIMUM();
 TfLiteRegistration *Register_STABLEHLO_MINIMUM();
 TfLiteRegistration *Register_STABLEHLO_AND();
+namespace squared_difference {
+void RiscvScalarSquaredDifferenceFloatFlat(int flat_size,
+                                           const float *input1_data,
+                                           const float *input2_data,
+                                           float *output_data);
+void RiscvScalarSquaredDifferenceInt32Flat(int flat_size,
+                                           const int32_t *input1_data,
+                                           const int32_t *input2_data,
+                                           int32_t *output_data);
+void RiscvScalarSquaredDifferenceInt8Flat(
+    int flat_size, const ArithmeticParams &params, const int8_t *input1_data,
+    const int8_t *input2_data, int8_t *output_data);
+#ifdef USE_RVV
+void RvvSquaredDifferenceFloatFlat(int flat_size, const float *input1_data,
+                                   const float *input2_data,
+                                   float *output_data);
+void RvvSquaredDifferenceInt32Flat(int flat_size, const int32_t *input1_data,
+                                   const int32_t *input2_data,
+                                   int32_t *output_data);
+#if !TFLITE_SINGLE_ROUNDING
+void RvvSquaredDifferenceInt8Flat(int flat_size,
+                                  const ArithmeticParams &params,
+                                  const int8_t *input1_data,
+                                  const int8_t *input2_data,
+                                  int8_t *output_data);
+#endif // !TFLITE_SINGLE_ROUNDING
+#endif // USE_RVV
+} // namespace squared_difference
 } // namespace builtin
 } // namespace ops
 
@@ -401,6 +429,47 @@ ArithmeticParams MakeInt8Params() {
   params.quantized_activation_min = -96;
   params.quantized_activation_max = 101;
   return params;
+}
+
+ArithmeticParams MakeInt8SquaredDifferenceParams() {
+  ArithmeticParams params;
+  params.left_shift = 7;
+  params.input1_offset = 11;
+  params.input2_offset = -17;
+  params.input1_multiplier = 1073741824;
+  params.input2_multiplier = 1610612736;
+  params.output_multiplier = 1073741824;
+  params.input1_shift = -1;
+  params.input2_shift = -2;
+  params.output_shift = -8;
+  params.output_offset = 3;
+  params.quantized_activation_min = -101;
+  params.quantized_activation_max = 97;
+  return params;
+}
+
+int8_t ReferenceSquaredDifferenceInt8(int8_t x, int8_t y,
+                                      const ArithmeticParams &params) {
+  const int32_t input1_val = params.input1_offset + x;
+  const int32_t input2_val = params.input2_offset + y;
+  const int32_t shifted_input1_val = input1_val * (1 << params.left_shift);
+  const int32_t shifted_input2_val = input2_val * (1 << params.left_shift);
+  const int32_t scaled_input1_val =
+      MultiplyByQuantizedMultiplierSmallerThanOneExp(
+          shifted_input1_val, params.input1_multiplier, params.input1_shift);
+  const int32_t scaled_input2_val =
+      MultiplyByQuantizedMultiplierSmallerThanOneExp(
+          shifted_input2_val, params.input2_multiplier, params.input2_shift);
+  const int32_t raw_diff = scaled_input1_val - scaled_input2_val;
+  const int32_t squared_raw_diff = raw_diff * raw_diff;
+  const int32_t raw_output =
+      MultiplyByQuantizedMultiplierSmallerThanOneExp(
+          squared_raw_diff, params.output_multiplier, params.output_shift) +
+      params.output_offset;
+  const int32_t clamped_output =
+      std::min(params.quantized_activation_max,
+               std::max(params.quantized_activation_min, raw_output));
+  return static_cast<int8_t>(clamped_output);
 }
 
 ArithmeticParams MakeUint8Params() {
@@ -2455,6 +2524,89 @@ TEST(RvvOpsTest, Int32DivElementwiseMatchesReferenceAcrossVectorBoundaries) {
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "size=" << size;
   }
 }
+
+TEST(RvvOpsTest, FloatSquaredDifferenceRiscvScalarAndRvvMatchReference) {
+  for (int size : Float32M4VectorLengths()) {
+    std::vector<float> input1;
+    std::vector<float> input2;
+    MakeStablehloSpecialFloatInputs(size, &input1, &input2);
+    std::vector<float> scalar(size);
+    std::vector<float> rvv(size);
+    std::vector<float> expected(size);
+
+    ops::builtin::squared_difference::RiscvScalarSquaredDifferenceFloatFlat(
+        size, input1.data(), input2.data(), scalar.data());
+    ops::builtin::squared_difference::RvvSquaredDifferenceFloatFlat(
+        size, input1.data(), input2.data(), rvv.data());
+    for (int i = 0; i < size; ++i) {
+      const float diff = input1[i] - input2[i];
+      expected[i] = diff * diff;
+    }
+
+    SCOPED_TRACE(::testing::Message() << "size=" << size);
+    ExpectFloatRelativeNearOrSpecial(scalar, expected);
+    ExpectFloatRelativeNearOrSpecial(rvv, expected);
+  }
+}
+
+TEST(RvvOpsTest, Int32SquaredDifferenceRiscvScalarAndRvvMatchReference) {
+  for (int size : Int32M4VectorLengths()) {
+    std::vector<int32_t> input1 = MakeInt32Input(size, 701);
+    std::vector<int32_t> input2 = MakeInt32Input(size, 1901);
+    if (size >= 4) {
+      input1[0] = 23000;
+      input2[0] = -23000;
+      input1[1] = -23000;
+      input2[1] = 23000;
+      input1[2] = 0;
+      input2[2] = 0;
+      input1[3] = -1;
+      input2[3] = 1;
+    }
+    std::vector<int32_t> scalar(size);
+    std::vector<int32_t> rvv(size);
+    std::vector<int32_t> expected(size);
+
+    ops::builtin::squared_difference::RiscvScalarSquaredDifferenceInt32Flat(
+        size, input1.data(), input2.data(), scalar.data());
+    ops::builtin::squared_difference::RvvSquaredDifferenceInt32Flat(
+        size, input1.data(), input2.data(), rvv.data());
+    for (int i = 0; i < size; ++i) {
+      const int32_t diff = input1[i] - input2[i];
+      expected[i] = diff * diff;
+    }
+
+    EXPECT_THAT(scalar, ElementsAreArray(expected)) << "scalar size=" << size;
+    EXPECT_THAT(rvv, ElementsAreArray(expected)) << "rvv size=" << size;
+  }
+}
+
+#if !TFLITE_SINGLE_ROUNDING
+TEST(RvvOpsTest, Int8SquaredDifferenceRiscvScalarAndRvvMatchReference) {
+  const ArithmeticParams params = MakeInt8SquaredDifferenceParams();
+
+  for (int size : Int8M1VectorLengths()) {
+    std::vector<int8_t> input1;
+    std::vector<int8_t> input2;
+    MakeSpecialInt8Inputs(size, &input1, &input2);
+    std::vector<int8_t> scalar(size);
+    std::vector<int8_t> rvv(size);
+    std::vector<int8_t> expected(size);
+
+    ops::builtin::squared_difference::RiscvScalarSquaredDifferenceInt8Flat(
+        size, params, input1.data(), input2.data(), scalar.data());
+    ops::builtin::squared_difference::RvvSquaredDifferenceInt8Flat(
+        size, params, input1.data(), input2.data(), rvv.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] =
+          ReferenceSquaredDifferenceInt8(input1[i], input2[i], params);
+    }
+
+    EXPECT_THAT(scalar, ElementsAreArray(expected)) << "scalar size=" << size;
+    EXPECT_THAT(rvv, ElementsAreArray(expected)) << "rvv size=" << size;
+  }
+}
+#endif // !TFLITE_SINGLE_ROUNDING
 
 TEST(RvvOpsTest, Int8AddElementwiseMatchesReferenceAcrossVectorBoundaries) {
   const ArithmeticParams params = MakeInt8Params();

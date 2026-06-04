@@ -16,10 +16,13 @@ limitations under the License.
 #include <stdint.h>
 
 #include <algorithm>
+#include <type_traits>
 
 #include "ruy/profiler/instrumentation.h"  // from @ruy
 #include "tflite/core/c/common.h"
 #include "tflite/kernels/internal/optimized/optimized_ops.h"
+#include "tflite/kernels/internal/optimized/rvv_check.h"
+#include "tflite/kernels/internal/optimized/rvv_ops.h"
 #include "tflite/kernels/internal/quantization_util.h"
 #include "tflite/kernels/internal/reference/binary_function.h"
 #include "tflite/kernels/internal/reference/integer_ops/add.h"
@@ -170,6 +173,121 @@ inline int8_t SquaredDifference(int8_t x, int8_t y,
   return static_cast<int8_t>(clamped_output);
 }
 
+void RiscvScalarSquaredDifferenceFloatFlat(int flat_size,
+                                           const float* input1_data,
+                                           const float* input2_data,
+                                           float* output_data) {
+  ruy::profiler::ScopeLabel label("SquaredDifference/Float/RiscvScalar");
+  for (int i = 0; i < flat_size; ++i) {
+    output_data[i] = SquaredDifference(input1_data[i], input2_data[i]);
+  }
+}
+
+void RiscvScalarSquaredDifferenceInt32Flat(int flat_size,
+                                           const int32_t* input1_data,
+                                           const int32_t* input2_data,
+                                           int32_t* output_data) {
+  ruy::profiler::ScopeLabel label("SquaredDifference/Int32/RiscvScalar");
+  for (int i = 0; i < flat_size; ++i) {
+    output_data[i] = SquaredDifference(input1_data[i], input2_data[i]);
+  }
+}
+
+void RiscvScalarSquaredDifferenceInt8Flat(
+    int flat_size, const ArithmeticParams& params, const int8_t* input1_data,
+    const int8_t* input2_data, int8_t* output_data) {
+  ruy::profiler::ScopeLabel label("SquaredDifference/Int8/RiscvScalar");
+  reference_integer_ops::CheckArithmeticParams(params);
+  for (int i = 0; i < flat_size; ++i) {
+    output_data[i] = SquaredDifference(input1_data[i], input2_data[i], params);
+  }
+}
+
+#ifdef USE_RVV
+void RvvSquaredDifferenceFloatFlat(int flat_size, const float* input1_data,
+                                   const float* input2_data,
+                                   float* output_data) {
+  ruy::profiler::ScopeLabel label("SquaredDifference/Float/RVV");
+  int i = 0;
+  while (i < flat_size) {
+    const size_t vl = __riscv_vsetvl_e32m4(flat_size - i);
+    const vfloat32m4_t input1 = __riscv_vle32_v_f32m4(input1_data + i, vl);
+    const vfloat32m4_t input2 = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    const vfloat32m4_t diff = __riscv_vfsub_vv_f32m4(input1, input2, vl);
+    const vfloat32m4_t squared = __riscv_vfmul_vv_f32m4(diff, diff, vl);
+    __riscv_vse32_v_f32m4(output_data + i, squared, vl);
+    i += vl;
+  }
+}
+
+void RvvSquaredDifferenceInt32Flat(int flat_size, const int32_t* input1_data,
+                                   const int32_t* input2_data,
+                                   int32_t* output_data) {
+  ruy::profiler::ScopeLabel label("SquaredDifference/Int32/RVV");
+  int i = 0;
+  while (i < flat_size) {
+    const size_t vl = __riscv_vsetvl_e32m4(flat_size - i);
+    const vint32m4_t input1 = __riscv_vle32_v_i32m4(input1_data + i, vl);
+    const vint32m4_t input2 = __riscv_vle32_v_i32m4(input2_data + i, vl);
+    const vint32m4_t diff = __riscv_vsub_vv_i32m4(input1, input2, vl);
+    const vint32m4_t squared = __riscv_vmul_vv_i32m4(diff, diff, vl);
+    __riscv_vse32_v_i32m4(output_data + i, squared, vl);
+    i += vl;
+  }
+}
+
+#if !TFLITE_SINGLE_ROUNDING
+void RvvSquaredDifferenceInt8Flat(int flat_size,
+                                  const ArithmeticParams& params,
+                                  const int8_t* input1_data,
+                                  const int8_t* input2_data,
+                                  int8_t* output_data) {
+  ruy::profiler::ScopeLabel label("SquaredDifference/Int8/RVV");
+  reference_integer_ops::CheckArithmeticParams(params);
+  int i = 0;
+  while (i < flat_size) {
+    const size_t vl = __riscv_vsetvl_e8m1(flat_size - i);
+    const vint8m1_t input1_i8 = __riscv_vle8_v_i8m1(input1_data + i, vl);
+    const vint8m1_t input2_i8 = __riscv_vle8_v_i8m1(input2_data + i, vl);
+    const vint16m2_t input1_i16 = __riscv_vsext_vf2_i16m2(input1_i8, vl);
+    const vint16m2_t input2_i16 = __riscv_vsext_vf2_i16m2(input2_i8, vl);
+    const vint32m4_t input1 = __riscv_vadd_vx_i32m4(
+        __riscv_vsext_vf2_i32m4(input1_i16, vl), params.input1_offset, vl);
+    const vint32m4_t input2 = __riscv_vadd_vx_i32m4(
+        __riscv_vsext_vf2_i32m4(input2_i16, vl), params.input2_offset, vl);
+    const vint32m4_t shifted_input1 =
+        __riscv_vsll_vx_i32m4(input1, params.left_shift, vl);
+    const vint32m4_t shifted_input2 =
+        __riscv_vsll_vx_i32m4(input2, params.left_shift, vl);
+    const vint32m4_t scaled_input1 =
+        rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            shifted_input1, params.input1_multiplier, params.input1_shift, vl);
+    const vint32m4_t scaled_input2 =
+        rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            shifted_input2, params.input2_multiplier, params.input2_shift, vl);
+    const vint32m4_t raw_diff =
+        __riscv_vsub_vv_i32m4(scaled_input1, scaled_input2, vl);
+    const vint32m4_t squared_raw_diff =
+        __riscv_vmul_vv_i32m4(raw_diff, raw_diff, vl);
+    vint32m4_t raw_output =
+        rvv_ops::MultiplyByQuantizedMultiplierSmallerThanOneExp(
+            squared_raw_diff, params.output_multiplier, params.output_shift,
+            vl);
+    raw_output = __riscv_vadd_vx_i32m4(raw_output, params.output_offset, vl);
+    raw_output = __riscv_vmax_vx_i32m4(raw_output,
+                                       params.quantized_activation_min, vl);
+    raw_output = __riscv_vmin_vx_i32m4(raw_output,
+                                       params.quantized_activation_max, vl);
+
+    const vint16m2_t narrowed_i16 = __riscv_vnsra_wx_i16m2(raw_output, 0, vl);
+    const vint8m1_t narrowed_i8 = __riscv_vnsra_wx_i8m1(narrowed_i16, 0, vl);
+    __riscv_vse8_v_i8m1(output_data + i, narrowed_i8, vl);
+    i += vl;
+  }
+}
+#endif  // !TFLITE_SINGLE_ROUNDING
+#endif  // USE_RVV
+
 template <typename T>
 void EvalQuantizedSquaredDifference(TfLiteContext* context, TfLiteNode* node,
                                     const OpData* data,
@@ -186,10 +304,20 @@ void EvalQuantizedSquaredDifference(TfLiteContext* context, TfLiteNode* node,
         SquaredDifference);
   } else {
     const int flat_size = GetTensorShape(input1).FlatSize();
+#if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+    RvvSquaredDifferenceInt8Flat(
+        flat_size, op_data->arithmetic_params, GetTensorData<int8_t>(input1),
+        GetTensorData<int8_t>(input2), GetTensorData<int8_t>(output));
+#elif defined(__riscv)
+    RiscvScalarSquaredDifferenceInt8Flat(
+        flat_size, op_data->arithmetic_params, GetTensorData<int8_t>(input1),
+        GetTensorData<int8_t>(input2), GetTensorData<int8_t>(output));
+#else
     reference_integer_ops::ElementWise(
         flat_size, op_data->arithmetic_params, GetTensorData<int8_t>(input1),
         GetTensorData<int8_t>(input2), GetTensorData<int8_t>(output),
         reference_integer_ops::CheckArithmeticParams, SquaredDifference);
+#endif
   }
 }
 
@@ -203,10 +331,50 @@ void EvalSquaredDifference(TfLiteContext* context, TfLiteNode* node,
         GetTensorShape(input2), GetTensorData<T>(input2),
         GetTensorShape(output), GetTensorData<T>(output), SquaredDifference<T>);
   } else {
+#ifdef USE_RVV
+    const int flat_size =
+        MatchingFlatSize(GetTensorShape(input1), GetTensorShape(input2),
+                         GetTensorShape(output));
+    if constexpr (std::is_same<T, float>::value) {
+      RvvSquaredDifferenceFloatFlat(flat_size, GetTensorData<float>(input1),
+                                    GetTensorData<float>(input2),
+                                    GetTensorData<float>(output));
+    } else if constexpr (std::is_same<T, int32_t>::value) {
+      RvvSquaredDifferenceInt32Flat(flat_size, GetTensorData<int32_t>(input1),
+                                    GetTensorData<int32_t>(input2),
+                                    GetTensorData<int32_t>(output));
+    } else {
+      reference_ops::BinaryFunction<T, T, T>(
+          GetTensorShape(input1), GetTensorData<T>(input1),
+          GetTensorShape(input2), GetTensorData<T>(input2),
+          GetTensorShape(output), GetTensorData<T>(output),
+          SquaredDifference<T>);
+    }
+#elif defined(__riscv)
+    const int flat_size =
+        MatchingFlatSize(GetTensorShape(input1), GetTensorShape(input2),
+                         GetTensorShape(output));
+    if constexpr (std::is_same<T, float>::value) {
+      RiscvScalarSquaredDifferenceFloatFlat(
+          flat_size, GetTensorData<float>(input1), GetTensorData<float>(input2),
+          GetTensorData<float>(output));
+    } else if constexpr (std::is_same<T, int32_t>::value) {
+      RiscvScalarSquaredDifferenceInt32Flat(
+          flat_size, GetTensorData<int32_t>(input1),
+          GetTensorData<int32_t>(input2), GetTensorData<int32_t>(output));
+    } else {
+      reference_ops::BinaryFunction<T, T, T>(
+          GetTensorShape(input1), GetTensorData<T>(input1),
+          GetTensorShape(input2), GetTensorData<T>(input2),
+          GetTensorShape(output), GetTensorData<T>(output),
+          SquaredDifference<T>);
+    }
+#else
     reference_ops::BinaryFunction<T, T, T>(
         GetTensorShape(input1), GetTensorData<T>(input1),
         GetTensorShape(input2), GetTensorData<T>(input2),
         GetTensorShape(output), GetTensorData<T>(output), SquaredDifference<T>);
+#endif
   }
 }
 
