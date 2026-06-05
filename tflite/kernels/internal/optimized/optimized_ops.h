@@ -3771,11 +3771,12 @@ inline int NodeOffset(int b, int h, int w, int height, int width) {
   return (b * height + h) * width + w;
 }
 
-inline bool AveragePool(const PoolParams& params,
-                        const RuntimeShape& input_shape,
-                        const float* input_data,
-                        const RuntimeShape& output_shape, float* output_data) {
-  ruy::profiler::ScopeLabel label("AveragePool");
+#if defined(__riscv)
+inline bool RiscvScalarAveragePool(
+    const PoolParams& params, const RuntimeShape& input_shape,
+    const float* input_data, const RuntimeShape& output_shape,
+    float* output_data) {
+  ruy::profiler::ScopeLabel label("AveragePool/RISCVScalar");
   TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
   TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
   const int batches = MatchingDim(input_shape, 0, output_shape, 0);
@@ -3786,11 +3787,68 @@ inline bool AveragePool(const PoolParams& params,
   const int output_width = output_shape.Dims(2);
   const int stride_height = params.stride_height;
   const int stride_width = params.stride_width;
+  if (stride_height == 0 || stride_width == 0) return false;
 
-  if (stride_height == 0) return false;
-  if (stride_width == 0) return false;
+  for (int batch = 0; batch < batches; ++batch) {
+    for (int out_y = 0; out_y < output_height; ++out_y) {
+      for (int out_x = 0; out_x < output_width; ++out_x) {
+        const int in_x_origin =
+            (out_x * stride_width) - params.padding_values.width;
+        const int in_y_origin =
+            (out_y * stride_height) - params.padding_values.height;
+        const int filter_x_start = std::max(0, -in_x_origin);
+        const int filter_x_end =
+            std::min(params.filter_width, input_width - in_x_origin);
+        const int filter_y_start = std::max(0, -in_y_origin);
+        const int filter_y_end =
+            std::min(params.filter_height, input_height - in_y_origin);
+        const int filter_count =
+            (filter_x_end - filter_x_start) * (filter_y_end - filter_y_start);
+        if (filter_count == 0) return false;
+        for (int channel = 0; channel < depth; ++channel) {
+          float sum = 0.0f;
+          for (int filter_y = filter_y_start; filter_y < filter_y_end;
+               ++filter_y) {
+            for (int filter_x = filter_x_start; filter_x < filter_x_end;
+                 ++filter_x) {
+              const int in_x = in_x_origin + filter_x;
+              const int in_y = in_y_origin + filter_y;
+              sum += input_data[Offset(input_shape, batch, in_y, in_x,
+                                       channel)];
+            }
+          }
+          const float average = sum / static_cast<float>(filter_count);
+          output_data[Offset(output_shape, batch, out_y, out_x, channel)] =
+              ActivationFunctionWithMinMax(average,
+                                           params.float_activation_min,
+                                           params.float_activation_max);
+        }
+      }
+    }
+  }
+  return true;
+}
+#endif  // defined(__riscv)
 
-#if defined(USE_RVV)
+#ifdef USE_RVV
+inline bool RvvAveragePool(const PoolParams& params,
+                           const RuntimeShape& input_shape,
+                           const float* input_data,
+                           const RuntimeShape& output_shape,
+                           float* output_data) {
+  ruy::profiler::ScopeLabel label("AveragePool/RVV");
+  TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
+  TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
+  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int depth = MatchingDim(input_shape, 3, output_shape, 3);
+  const int input_height = input_shape.Dims(1);
+  const int input_width = input_shape.Dims(2);
+  const int output_height = output_shape.Dims(1);
+  const int output_width = output_shape.Dims(2);
+  const int stride_height = params.stride_height;
+  const int stride_width = params.stride_width;
+  if (stride_height == 0 || stride_width == 0) return false;
+
   for (int batch = 0; batch < batches; ++batch) {
     for (int out_y = 0; out_y < output_height; ++out_y) {
       for (int out_x = 0; out_x < output_width; ++out_x) {
@@ -3837,7 +3895,35 @@ inline bool AveragePool(const PoolParams& params,
     }
   }
   return true;
+}
 #endif  // USE_RVV
+
+inline bool AveragePool(const PoolParams& params,
+                        const RuntimeShape& input_shape,
+                        const float* input_data,
+                        const RuntimeShape& output_shape, float* output_data) {
+  ruy::profiler::ScopeLabel label("AveragePool");
+  TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
+  TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
+  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int depth = MatchingDim(input_shape, 3, output_shape, 3);
+  const int input_height = input_shape.Dims(1);
+  const int input_width = input_shape.Dims(2);
+  const int output_height = output_shape.Dims(1);
+  const int output_width = output_shape.Dims(2);
+  const int stride_height = params.stride_height;
+  const int stride_width = params.stride_width;
+
+  if (stride_height == 0) return false;
+  if (stride_width == 0) return false;
+
+#ifdef USE_RVV
+  return RvvAveragePool(params, input_shape, input_data, output_shape,
+                        output_data);
+#elif defined(__riscv)
+  return RiscvScalarAveragePool(params, input_shape, input_data, output_shape,
+                                output_data);
+#endif
 
   // TODO(benoitjacob) make this a proper reference impl without Eigen!
   const auto in_mat = MapAsMatrixWithLastDimAsRows(input_data, input_shape);
@@ -3888,6 +3974,164 @@ inline bool AveragePool(const PoolParams& params,
   return true;
 }
 
+#if defined(__riscv)
+inline bool RiscvScalarAveragePool(
+    const PoolParams& params, const RuntimeShape& input_shape,
+    const uint8_t* input_data, const RuntimeShape& output_shape,
+    uint8_t* output_data) {
+  ruy::profiler::ScopeLabel label("AveragePool/8bit/RISCVScalar");
+  TFLITE_DCHECK_LE(params.quantized_activation_min,
+                   params.quantized_activation_max);
+  TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
+  TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
+  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int depth = MatchingDim(input_shape, 3, output_shape, 3);
+  const int input_height = input_shape.Dims(1);
+  const int input_width = input_shape.Dims(2);
+  const int output_height = output_shape.Dims(1);
+  const int output_width = output_shape.Dims(2);
+  const int stride_height = params.stride_height;
+  const int stride_width = params.stride_width;
+  if (stride_height == 0 || stride_width == 0) return false;
+
+  for (int batch = 0; batch < batches; ++batch) {
+    for (int out_y = 0; out_y < output_height; ++out_y) {
+      for (int out_x = 0; out_x < output_width; ++out_x) {
+        const int in_x_origin =
+            (out_x * stride_width) - params.padding_values.width;
+        const int in_y_origin =
+            (out_y * stride_height) - params.padding_values.height;
+        const int filter_x_start = std::max(0, -in_x_origin);
+        const int filter_x_end =
+            std::min(params.filter_width, input_width - in_x_origin);
+        const int filter_y_start = std::max(0, -in_y_origin);
+        const int filter_y_end =
+            std::min(params.filter_height, input_height - in_y_origin);
+        const int filter_count =
+            (filter_x_end - filter_x_start) * (filter_y_end - filter_y_start);
+        if (filter_count == 0) return false;
+        for (int channel = 0; channel < depth; ++channel) {
+          uint32_t acc = 0;
+          for (int filter_y = filter_y_start; filter_y < filter_y_end;
+               ++filter_y) {
+            for (int filter_x = filter_x_start; filter_x < filter_x_end;
+                 ++filter_x) {
+              const int in_x = in_x_origin + filter_x;
+              const int in_y = in_y_origin + filter_y;
+              acc += input_data[Offset(input_shape, batch, in_y, in_x,
+                                       channel)];
+            }
+          }
+          uint32_t average = (acc + filter_count / 2) / filter_count;
+          average = std::max<uint32_t>(average, params.quantized_activation_min);
+          average = std::min<uint32_t>(average, params.quantized_activation_max);
+          output_data[Offset(output_shape, batch, out_y, out_x, channel)] =
+              static_cast<uint8_t>(average);
+        }
+      }
+    }
+  }
+  return true;
+}
+#endif  // defined(__riscv)
+
+#ifdef USE_RVV
+inline bool RvvAveragePool(const PoolParams& params,
+                           const RuntimeShape& input_shape,
+                           const uint8_t* input_data,
+                           const RuntimeShape& output_shape,
+                           uint8_t* output_data) {
+  ruy::profiler::ScopeLabel label("AveragePool/8bit/RVV");
+  static constexpr int kPoolingAccTrancheSize = 256;
+  TFLITE_DCHECK_LE(params.quantized_activation_min,
+                   params.quantized_activation_max);
+  TFLITE_DCHECK_EQ(input_shape.DimensionsCount(), 4);
+  TFLITE_DCHECK_EQ(output_shape.DimensionsCount(), 4);
+  const int batches = MatchingDim(input_shape, 0, output_shape, 0);
+  const int depth = MatchingDim(input_shape, 3, output_shape, 3);
+  const int input_height = input_shape.Dims(1);
+  const int input_width = input_shape.Dims(2);
+  const int output_height = output_shape.Dims(1);
+  const int output_width = output_shape.Dims(2);
+  const int stride_height = params.stride_height;
+  const int stride_width = params.stride_width;
+  if (stride_height == 0 || stride_width == 0) return false;
+
+  uint32_t acc[kPoolingAccTrancheSize];
+  for (int batch = 0; batch < batches; ++batch) {
+    for (int depth_base = 0; depth_base < depth;
+         depth_base += kPoolingAccTrancheSize) {
+      const int tranche_depth =
+          std::min(depth - depth_base, kPoolingAccTrancheSize);
+      for (int out_y = 0; out_y < output_height; ++out_y) {
+        for (int out_x = 0; out_x < output_width; ++out_x) {
+          const int in_x_origin =
+              (out_x * stride_width) - params.padding_values.width;
+          const int in_y_origin =
+              (out_y * stride_height) - params.padding_values.height;
+          const int filter_x_start = std::max(0, -in_x_origin);
+          const int filter_x_end =
+              std::min(params.filter_width, input_width - in_x_origin);
+          const int filter_y_start = std::max(0, -in_y_origin);
+          const int filter_y_end =
+              std::min(params.filter_height, input_height - in_y_origin);
+          const int filter_count =
+              (filter_x_end - filter_x_start) * (filter_y_end - filter_y_start);
+          if (filter_count == 0) return false;
+          memset(acc, 0, tranche_depth * sizeof(acc[0]));
+          const uint8_t* input_ptr =
+              input_data + depth_base +
+              depth * (in_x_origin +
+                       input_width * (in_y_origin + input_height * batch));
+          for (int fy = filter_y_start; fy < filter_y_end; fy++) {
+            const uint8_t* input_row_ptr =
+                input_ptr + depth * (fy * input_width + filter_x_start);
+            for (int fx = filter_x_start; fx < filter_x_end; fx++) {
+              const uint8_t* input_channel_ptr = input_row_ptr;
+              for (int channel = 0; channel < tranche_depth;) {
+                const size_t vl = __riscv_vsetvl_e8m1(tranche_depth - channel);
+                const vuint8m1_t input =
+                    __riscv_vle8_v_u8m1(input_channel_ptr, vl);
+                const vuint32m4_t input_wide =
+                    __riscv_vzext_vf4_u32m4(input, vl);
+                const vuint32m4_t acc_reg =
+                    __riscv_vle32_v_u32m4(acc + channel, vl);
+                __riscv_vse32_v_u32m4(
+                    acc + channel,
+                    __riscv_vadd_vv_u32m4(acc_reg, input_wide, vl), vl);
+                input_channel_ptr += vl;
+                channel += vl;
+              }
+              input_row_ptr += depth;
+            }
+          }
+          uint8_t* output_ptr = output_data + Offset(output_shape, batch, out_y,
+                                                     out_x, depth_base);
+          for (int channel = 0; channel < tranche_depth;) {
+            const size_t vl = __riscv_vsetvl_e32m4(tranche_depth - channel);
+            vuint32m4_t output = __riscv_vle32_v_u32m4(acc + channel, vl);
+            output =
+                __riscv_vadd_vx_u32m4(output, filter_count / 2, vl);
+            output = __riscv_vdivu_vx_u32m4(output, filter_count, vl);
+            output = __riscv_vmaxu_vx_u32m4(
+                output, params.quantized_activation_min, vl);
+            output = __riscv_vminu_vx_u32m4(
+                output, params.quantized_activation_max, vl);
+            const vuint16m2_t output_u16 =
+                __riscv_vnsrl_wx_u16m2(output, 0, vl);
+            const vuint8m1_t output_u8 =
+                __riscv_vnsrl_wx_u8m1(output_u16, 0, vl);
+            __riscv_vse8_v_u8m1(output_ptr + channel, output_u8, vl);
+            channel += vl;
+          }
+        }
+      }
+    }
+  }
+  return true;
+}
+#endif  // USE_RVV
+
 inline bool AveragePool(const PoolParams& params,
                         const RuntimeShape& input_shape,
                         const uint8_t* input_data,
@@ -3914,6 +4158,15 @@ inline bool AveragePool(const PoolParams& params,
   const int output_width = output_shape.Dims(2);
   const int stride_height = params.stride_height;
   const int stride_width = params.stride_width;
+  if (stride_height == 0 || stride_width == 0) return false;
+
+#ifdef USE_RVV
+  return RvvAveragePool(params, input_shape, input_data, output_shape,
+                        output_data);
+#elif defined(__riscv)
+  return RiscvScalarAveragePool(params, input_shape, input_data, output_shape,
+                                output_data);
+#endif
 
   uint32_t acc[kPoolingAccTrancheSize];
   for (int batch = 0; batch < batches; ++batch) {

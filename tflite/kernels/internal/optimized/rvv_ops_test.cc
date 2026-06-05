@@ -2346,15 +2346,23 @@ TEST(RvvOpsTest, FloatAveragePoolMatchesReferenceAcrossVectorBoundaries) {
     const RuntimeShape input_shape({1, 4, 5, depth});
     const RuntimeShape output_shape({1, 4, 3, depth});
     const std::vector<float> input = MakeInput(input_shape.FlatSize(), 0.125f);
+    std::vector<float> scalar(output_shape.FlatSize());
+    std::vector<float> rvv(output_shape.FlatSize());
     std::vector<float> actual(output_shape.FlatSize());
     std::vector<float> expected(output_shape.FlatSize());
 
+    EXPECT_TRUE(optimized_ops::RiscvScalarAveragePool(
+        params, input_shape, input.data(), output_shape, scalar.data()));
+    EXPECT_TRUE(optimized_ops::RvvAveragePool(params, input_shape, input.data(),
+                                             output_shape, rvv.data()));
     EXPECT_TRUE(optimized_ops::AveragePool(params, input_shape, input.data(),
                                            output_shape, actual.data()));
     EXPECT_TRUE(reference_ops::AveragePool(params, input_shape, input.data(),
                                            output_shape, expected.data()));
 
     SCOPED_TRACE(::testing::Message() << "depth=" << depth);
+    ExpectFloatRelativeNearOrSpecial(scalar, expected, 1e-6f);
+    ExpectFloatRelativeNearOrSpecial(rvv, expected, 1e-6f);
     ExpectFloatRelativeNearOrSpecial(actual, expected, 1e-6f);
   }
 }
@@ -2370,14 +2378,22 @@ TEST(RvvOpsTest, Uint8AveragePoolMatchesReferenceAcrossVectorBoundaries) {
     const RuntimeShape output_shape({1, 4, 3, depth});
     const std::vector<uint8_t> input =
         MakeUint8Input(input_shape.FlatSize(), 89);
+    std::vector<uint8_t> scalar(output_shape.FlatSize());
+    std::vector<uint8_t> rvv(output_shape.FlatSize());
     std::vector<uint8_t> actual(output_shape.FlatSize());
     std::vector<uint8_t> expected(output_shape.FlatSize());
 
+    EXPECT_TRUE(optimized_ops::RiscvScalarAveragePool(
+        params, input_shape, input.data(), output_shape, scalar.data()));
+    EXPECT_TRUE(optimized_ops::RvvAveragePool(params, input_shape, input.data(),
+                                             output_shape, rvv.data()));
     EXPECT_TRUE(optimized_ops::AveragePool(params, input_shape, input.data(),
                                            output_shape, actual.data()));
     EXPECT_TRUE(reference_ops::AveragePool(params, input_shape, input.data(),
                                            output_shape, expected.data()));
 
+    EXPECT_THAT(scalar, ElementsAreArray(expected)) << "depth=" << depth;
+    EXPECT_THAT(rvv, ElementsAreArray(expected)) << "depth=" << depth;
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
   }
 }
@@ -2393,14 +2409,22 @@ TEST(RvvOpsTest, Int8AveragePoolMatchesReferenceAcrossVectorBoundaries) {
     const RuntimeShape output_shape({1, 4, 3, depth});
     const std::vector<int8_t> input =
         MakeInt8Input(input_shape.FlatSize(), 181);
+    std::vector<int8_t> scalar(output_shape.FlatSize());
+    std::vector<int8_t> rvv(output_shape.FlatSize());
     std::vector<int8_t> actual(output_shape.FlatSize());
     std::vector<int8_t> expected(output_shape.FlatSize());
 
+    EXPECT_TRUE(optimized_integer_ops::RiscvScalarAveragePool(
+        params, input_shape, input.data(), output_shape, scalar.data()));
+    EXPECT_TRUE(optimized_integer_ops::RvvAveragePool(
+        params, input_shape, input.data(), output_shape, rvv.data()));
     EXPECT_TRUE(optimized_integer_ops::AveragePool(
         params, input_shape, input.data(), output_shape, actual.data()));
     EXPECT_TRUE(reference_integer_ops::AveragePool(
         params, input_shape, input.data(), output_shape, expected.data()));
 
+    EXPECT_THAT(scalar, ElementsAreArray(expected)) << "depth=" << depth;
+    EXPECT_THAT(rvv, ElementsAreArray(expected)) << "depth=" << depth;
     EXPECT_THAT(actual, ElementsAreArray(expected)) << "depth=" << depth;
   }
 }
