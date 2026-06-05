@@ -9223,10 +9223,107 @@ void Transpose(const TransposeParams& params, const RuntimeShape& input_shape,
 }
 
 // Assume input1 & input2 have the same scale & zero point.
+inline void RiscvScalarMaximumElementwiseInt8(const int size,
+                                             const int8_t* input1_data,
+                                             const int8_t* input2_data,
+                                             int8_t* output_data) {
+  for (int i = 0; i < size; ++i) {
+    output_data[i] = std::max(input1_data[i], input2_data[i]);
+  }
+}
+
+inline void RiscvScalarMaximumScalarBroadcastInt8(const int size,
+                                                 const int8_t input1_data,
+                                                 const int8_t* input2_data,
+                                                 int8_t* output_data) {
+  for (int i = 0; i < size; ++i) {
+    output_data[i] = std::max(input1_data, input2_data[i]);
+  }
+}
+
+inline void RiscvScalarMinimumElementwiseInt8(const int size,
+                                             const int8_t* input1_data,
+                                             const int8_t* input2_data,
+                                             int8_t* output_data) {
+  for (int i = 0; i < size; ++i) {
+    output_data[i] = std::min(input1_data[i], input2_data[i]);
+  }
+}
+
+inline void RiscvScalarMinimumScalarBroadcastInt8(const int size,
+                                                 const int8_t input1_data,
+                                                 const int8_t* input2_data,
+                                                 int8_t* output_data) {
+  for (int i = 0; i < size; ++i) {
+    output_data[i] = std::min(input1_data, input2_data[i]);
+  }
+}
+
+#ifdef USE_RVV
+inline void RvvMaximumElementwiseInt8(int size, const int8_t* input1_data,
+                                      const int8_t* input2_data,
+                                      int8_t* output_data) {
+  int i = 0;
+  while (i < size) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    vint8m1_t lhs = __riscv_vle8_v_i8m1(input1_data + i, vl);
+    vint8m1_t rhs = __riscv_vle8_v_i8m1(input2_data + i, vl);
+    vint8m1_t result = __riscv_vmax_vv_i8m1(lhs, rhs, vl);
+    __riscv_vse8_v_i8m1(output_data + i, result, vl);
+    i += vl;
+  }
+}
+
+inline void RvvMaximumScalarBroadcastInt8(int size, int8_t input1_data,
+                                          const int8_t* input2_data,
+                                          int8_t* output_data) {
+  int i = 0;
+  while (i < size) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    vint8m1_t rhs = __riscv_vle8_v_i8m1(input2_data + i, vl);
+    vint8m1_t result = __riscv_vmax_vx_i8m1(rhs, input1_data, vl);
+    __riscv_vse8_v_i8m1(output_data + i, result, vl);
+    i += vl;
+  }
+}
+
+inline void RvvMinimumElementwiseInt8(int size, const int8_t* input1_data,
+                                      const int8_t* input2_data,
+                                      int8_t* output_data) {
+  int i = 0;
+  while (i < size) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    vint8m1_t lhs = __riscv_vle8_v_i8m1(input1_data + i, vl);
+    vint8m1_t rhs = __riscv_vle8_v_i8m1(input2_data + i, vl);
+    vint8m1_t result = __riscv_vmin_vv_i8m1(lhs, rhs, vl);
+    __riscv_vse8_v_i8m1(output_data + i, result, vl);
+    i += vl;
+  }
+}
+
+inline void RvvMinimumScalarBroadcastInt8(int size, int8_t input1_data,
+                                          const int8_t* input2_data,
+                                          int8_t* output_data) {
+  int i = 0;
+  while (i < size) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    vint8m1_t rhs = __riscv_vle8_v_i8m1(input2_data + i, vl);
+    vint8m1_t result = __riscv_vmin_vx_i8m1(rhs, input1_data, vl);
+    __riscv_vse8_v_i8m1(output_data + i, result, vl);
+    i += vl;
+  }
+}
+#endif  // USE_RVV
+
 inline void MaximumElementwise(int size, const ArithmeticParams& params,
                                const int8_t* input1_data,
                                const int8_t* input2_data, int8_t* output_data) {
   ruy::profiler::ScopeLabel label("MaximumElementwiseInt8/8bit");
+  (void)params;
+#ifdef USE_RVV
+  RvvMaximumElementwiseInt8(size, input1_data, input2_data, output_data);
+  return;
+#endif  // USE_RVV
   int i = 0;
 #ifdef USE_NEON
   for (; i <= size - 16; i += 16) {
@@ -9238,9 +9335,7 @@ inline void MaximumElementwise(int size, const ArithmeticParams& params,
   }
 #endif  // USE_NEON
   for (; i < size; ++i) {
-    const int8_t input1_val = input1_data[i];
-    const int8_t input2_val = input2_data[i];
-    output_data[i] = std::max(input1_val, input2_val);
+    output_data[i] = std::max(input1_data[i], input2_data[i]);
   }
 }
 
@@ -9249,6 +9344,11 @@ inline void MaximumScalarBroadcast(int size, const ArithmeticParams& params,
                                    const int8_t* input2_data,
                                    int8_t* output_data) {
   ruy::profiler::ScopeLabel label("MaximumScalarBroadcastInt8/8bit");
+  (void)params;
+#ifdef USE_RVV
+  RvvMaximumScalarBroadcastInt8(size, input1_data, input2_data, output_data);
+  return;
+#endif  // USE_RVV
   int i = 0;
 
 #ifdef USE_NEON
@@ -9261,8 +9361,7 @@ inline void MaximumScalarBroadcast(int size, const ArithmeticParams& params,
   }
 #endif  // USE_NEON
   for (; i < size; ++i) {
-    const int8_t input2_val = input2_data[i];
-    output_data[i] = std::max(input1_data, input2_val);
+    output_data[i] = std::max(input1_data, input2_data[i]);
   }
 }
 
@@ -9271,6 +9370,11 @@ inline void MinimumElementwise(int size, const ArithmeticParams& params,
                                const int8_t* input1_data,
                                const int8_t* input2_data, int8_t* output_data) {
   ruy::profiler::ScopeLabel label("MinimumElementwiseInt8/8bit");
+  (void)params;
+#ifdef USE_RVV
+  RvvMinimumElementwiseInt8(size, input1_data, input2_data, output_data);
+  return;
+#endif  // USE_RVV
   int i = 0;
 #ifdef USE_NEON
   for (; i <= size - 16; i += 16) {
@@ -9282,9 +9386,7 @@ inline void MinimumElementwise(int size, const ArithmeticParams& params,
   }
 #endif  // USE_NEON
   for (; i < size; ++i) {
-    const int8_t input1_val = input1_data[i];
-    const int8_t input2_val = input2_data[i];
-    output_data[i] = std::min(input1_val, input2_val);
+    output_data[i] = std::min(input1_data[i], input2_data[i]);
   }
 }
 
@@ -9293,6 +9395,11 @@ inline void MinimumScalarBroadcast(int size, const ArithmeticParams& params,
                                    const int8_t* input2_data,
                                    int8_t* output_data) {
   ruy::profiler::ScopeLabel label("MinimumScalarBroadcastInt8/8bit");
+  (void)params;
+#ifdef USE_RVV
+  RvvMinimumScalarBroadcastInt8(size, input1_data, input2_data, output_data);
+  return;
+#endif  // USE_RVV
   int i = 0;
 
 #ifdef USE_NEON
@@ -9305,9 +9412,156 @@ inline void MinimumScalarBroadcast(int size, const ArithmeticParams& params,
   }
 #endif  // USE_NEON
   for (; i < size; ++i) {
-    const int8_t input2_val = input2_data[i];
-    output_data[i] = std::min(input1_data, input2_val);
+    output_data[i] = std::min(input1_data, input2_data[i]);
   }
+}
+
+inline void RiscvScalarMaximumElementwiseFloat(int size,
+                                               const float* input1_data,
+                                               const float* input2_data,
+                                               float* output_data) {
+  for (int i = 0; i < size; ++i) {
+    output_data[i] = std::max(input1_data[i], input2_data[i]);
+  }
+}
+
+inline void RiscvScalarMaximumScalarBroadcastFloat(int size, float input1_data,
+                                                  const float* input2_data,
+                                                  float* output_data) {
+  for (int i = 0; i < size; ++i) {
+    output_data[i] = std::max(input1_data, input2_data[i]);
+  }
+}
+
+inline void RiscvScalarMinimumElementwiseFloat(int size,
+                                               const float* input1_data,
+                                               const float* input2_data,
+                                               float* output_data) {
+  for (int i = 0; i < size; ++i) {
+    output_data[i] = std::min(input1_data[i], input2_data[i]);
+  }
+}
+
+inline void RiscvScalarMinimumScalarBroadcastFloat(int size, float input1_data,
+                                                  const float* input2_data,
+                                                  float* output_data) {
+  for (int i = 0; i < size; ++i) {
+    output_data[i] = std::min(input1_data, input2_data[i]);
+  }
+}
+
+#ifdef USE_RVV
+inline void RvvMaximumElementwiseFloat(int size, const float* input1_data,
+                                       const float* input2_data,
+                                       float* output_data) {
+  int i = 0;
+  while (i < size) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t lhs = __riscv_vle32_v_f32m4(input1_data + i, vl);
+    vfloat32m4_t rhs = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t result = __riscv_vfmax_vv_f32m4(lhs, rhs, vl);
+    __riscv_vse32_v_f32m4(output_data + i, result, vl);
+    i += vl;
+  }
+}
+
+inline void RvvMaximumScalarBroadcastFloat(int size, float input1_data,
+                                           const float* input2_data,
+                                           float* output_data) {
+  int i = 0;
+  while (i < size) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t rhs = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t result = __riscv_vfmax_vf_f32m4(rhs, input1_data, vl);
+    __riscv_vse32_v_f32m4(output_data + i, result, vl);
+    i += vl;
+  }
+}
+
+inline void RvvMinimumElementwiseFloat(int size, const float* input1_data,
+                                       const float* input2_data,
+                                       float* output_data) {
+  int i = 0;
+  while (i < size) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t lhs = __riscv_vle32_v_f32m4(input1_data + i, vl);
+    vfloat32m4_t rhs = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t result = __riscv_vfmin_vv_f32m4(lhs, rhs, vl);
+    __riscv_vse32_v_f32m4(output_data + i, result, vl);
+    i += vl;
+  }
+}
+
+inline void RvvMinimumScalarBroadcastFloat(int size, float input1_data,
+                                           const float* input2_data,
+                                           float* output_data) {
+  int i = 0;
+  while (i < size) {
+    const size_t vl = __riscv_vsetvl_e32m4(size - i);
+    vfloat32m4_t rhs = __riscv_vle32_v_f32m4(input2_data + i, vl);
+    vfloat32m4_t result = __riscv_vfmin_vf_f32m4(rhs, input1_data, vl);
+    __riscv_vse32_v_f32m4(output_data + i, result, vl);
+    i += vl;
+  }
+}
+#endif  // USE_RVV
+
+inline void MaximumElementwiseFloat(int size, const ArithmeticParams& params,
+                                    const float* input1_data,
+                                    const float* input2_data,
+                                    float* output_data) {
+  ruy::profiler::ScopeLabel label("MaximumElementwiseFloat");
+  (void)params;
+#ifdef USE_RVV
+  RvvMaximumElementwiseFloat(size, input1_data, input2_data, output_data);
+#else
+  RiscvScalarMaximumElementwiseFloat(size, input1_data, input2_data,
+                                     output_data);
+#endif  // USE_RVV
+}
+
+inline void MaximumScalarBroadcastFloat(int size,
+                                        const ArithmeticParams& params,
+                                        float input1_data,
+                                        const float* input2_data,
+                                        float* output_data) {
+  ruy::profiler::ScopeLabel label("MaximumScalarBroadcastFloat");
+  (void)params;
+#ifdef USE_RVV
+  RvvMaximumScalarBroadcastFloat(size, input1_data, input2_data, output_data);
+#else
+  RiscvScalarMaximumScalarBroadcastFloat(size, input1_data, input2_data,
+                                         output_data);
+#endif  // USE_RVV
+}
+
+inline void MinimumElementwiseFloat(int size, const ArithmeticParams& params,
+                                    const float* input1_data,
+                                    const float* input2_data,
+                                    float* output_data) {
+  ruy::profiler::ScopeLabel label("MinimumElementwiseFloat");
+  (void)params;
+#ifdef USE_RVV
+  RvvMinimumElementwiseFloat(size, input1_data, input2_data, output_data);
+#else
+  RiscvScalarMinimumElementwiseFloat(size, input1_data, input2_data,
+                                     output_data);
+#endif  // USE_RVV
+}
+
+inline void MinimumScalarBroadcastFloat(int size,
+                                        const ArithmeticParams& params,
+                                        float input1_data,
+                                        const float* input2_data,
+                                        float* output_data) {
+  ruy::profiler::ScopeLabel label("MinimumScalarBroadcastFloat");
+  (void)params;
+#ifdef USE_RVV
+  RvvMinimumScalarBroadcastFloat(size, input1_data, input2_data, output_data);
+#else
+  RiscvScalarMinimumScalarBroadcastFloat(size, input1_data, input2_data,
+                                         output_data);
+#endif  // USE_RVV
 }
 
 template <typename Op>
@@ -9330,6 +9584,26 @@ inline void BroadcastMaximumDispatch(const ArithmeticParams& params,
 }
 
 template <typename Op>
+inline void BroadcastMaximumDispatch(const ArithmeticParams& params,
+                                     const RuntimeShape& input1_shape,
+                                     const float* input1_data,
+                                     const RuntimeShape& input2_shape,
+                                     const float* input2_data,
+                                     const RuntimeShape& output_shape,
+                                     float* output_data, Op op) {
+  if (params.broadcast_category == BroadcastableOpCategory::kGenericBroadcast) {
+    return reference_ops::MaximumMinimumBroadcastSlow(
+        input1_shape, input1_data, input2_shape, input2_data, output_shape,
+        output_data, op);
+  }
+
+  BinaryBroadcastFiveFold(params, input1_shape, input1_data, input2_shape,
+                          input2_data, output_shape, output_data,
+                          MaximumElementwiseFloat,
+                          MaximumScalarBroadcastFloat);
+}
+
+template <typename Op>
 inline void BroadcastMinimumDispatch(const ArithmeticParams& params,
                                      const RuntimeShape& input1_shape,
                                      const int8_t* input1_data,
@@ -9346,6 +9620,26 @@ inline void BroadcastMinimumDispatch(const ArithmeticParams& params,
   BinaryBroadcastFiveFold(params, input1_shape, input1_data, input2_shape,
                           input2_data, output_shape, output_data,
                           MinimumElementwise, MinimumScalarBroadcast);
+}
+
+template <typename Op>
+inline void BroadcastMinimumDispatch(const ArithmeticParams& params,
+                                     const RuntimeShape& input1_shape,
+                                     const float* input1_data,
+                                     const RuntimeShape& input2_shape,
+                                     const float* input2_data,
+                                     const RuntimeShape& output_shape,
+                                     float* output_data, Op op) {
+  if (params.broadcast_category == BroadcastableOpCategory::kGenericBroadcast) {
+    return reference_ops::MaximumMinimumBroadcastSlow(
+        input1_shape, input1_data, input2_shape, input2_data, output_shape,
+        output_data, op);
+  }
+
+  BinaryBroadcastFiveFold(params, input1_shape, input1_data, input2_shape,
+                          input2_data, output_shape, output_data,
+                          MinimumElementwiseFloat,
+                          MinimumScalarBroadcastFloat);
 }
 
 template <typename T>

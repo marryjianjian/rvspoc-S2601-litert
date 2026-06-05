@@ -106,11 +106,63 @@ void TFLiteOperation(TfLiteContext* context, TfLiteNode* node,
       op_type::template op<data_type>);
 }
 
+// Maximum generic opt float.
+template <>
+void TFLiteOperation<maximum_minimum::kGenericOptimized, float, MaximumOp>(
+    TfLiteContext* context, TfLiteNode* node, const OpContext& op_context) {
+  tflite::ArithmeticParams op_params = {};
+  const bool need_broadcast = optimized_ops::ProcessBroadcastShapes(
+      GetTensorShape(op_context.input1), GetTensorShape(op_context.input2),
+      &op_params);
+  if (need_broadcast) {
+    optimized_ops::BroadcastMaximumDispatch(
+        op_params, GetTensorShape(op_context.input1),
+        GetTensorData<float>(op_context.input1),
+        GetTensorShape(op_context.input2),
+        GetTensorData<float>(op_context.input2),
+        GetTensorShape(op_context.output),
+        GetTensorData<float>(op_context.output),
+        MaximumOp::template op<float>);
+    return;
+  }
+  optimized_ops::MaximumElementwiseFloat(
+      GetTensorShape(op_context.output).FlatSize(), op_params,
+      GetTensorData<float>(op_context.input1),
+      GetTensorData<float>(op_context.input2),
+      GetTensorData<float>(op_context.output));
+}
+
+// Minimum generic opt float.
+template <>
+void TFLiteOperation<maximum_minimum::kGenericOptimized, float, MinimumOp>(
+    TfLiteContext* context, TfLiteNode* node, const OpContext& op_context) {
+  tflite::ArithmeticParams op_params = {};
+  const bool need_broadcast = optimized_ops::ProcessBroadcastShapes(
+      GetTensorShape(op_context.input1), GetTensorShape(op_context.input2),
+      &op_params);
+  if (need_broadcast) {
+    optimized_ops::BroadcastMinimumDispatch(
+        op_params, GetTensorShape(op_context.input1),
+        GetTensorData<float>(op_context.input1),
+        GetTensorShape(op_context.input2),
+        GetTensorData<float>(op_context.input2),
+        GetTensorShape(op_context.output),
+        GetTensorData<float>(op_context.output),
+        MinimumOp::template op<float>);
+    return;
+  }
+  optimized_ops::MinimumElementwiseFloat(
+      GetTensorShape(op_context.output).FlatSize(), op_params,
+      GetTensorData<float>(op_context.input1),
+      GetTensorData<float>(op_context.input2),
+      GetTensorData<float>(op_context.output));
+}
+
 // Maximum generic opt int8.
 template <>
 void TFLiteOperation<maximum_minimum::kGenericOptimized, int8, MaximumOp>(
     TfLiteContext* context, TfLiteNode* node, const OpContext& op_context) {
-  tflite::ArithmeticParams op_params;
+  tflite::ArithmeticParams op_params = {};
   const bool need_broadcast = optimized_ops::ProcessBroadcastShapes(
       GetTensorShape(op_context.input1), GetTensorShape(op_context.input2),
       &op_params);
@@ -124,18 +176,18 @@ void TFLiteOperation<maximum_minimum::kGenericOptimized, int8, MaximumOp>(
         GetTensorData<int8>(op_context.output), MaximumOp::template op<int8>);
     return;
   }
-  reference_ops::MaximumMinimumBroadcastSlow(
-      GetTensorShape(op_context.input1), GetTensorData<int8>(op_context.input1),
-      GetTensorShape(op_context.input2), GetTensorData<int8>(op_context.input2),
-      GetTensorShape(op_context.output), GetTensorData<int8>(op_context.output),
-      MaximumOp::template op<int8>);
+  optimized_ops::MaximumElementwise(
+      GetTensorShape(op_context.output).FlatSize(), op_params,
+      GetTensorData<int8>(op_context.input1),
+      GetTensorData<int8>(op_context.input2),
+      GetTensorData<int8>(op_context.output));
 }
 
 // Minimum generic opt int8.
 template <>
 void TFLiteOperation<maximum_minimum::kGenericOptimized, int8, MinimumOp>(
     TfLiteContext* context, TfLiteNode* node, const OpContext& op_context) {
-  tflite::ArithmeticParams op_params;
+  tflite::ArithmeticParams op_params = {};
   const bool need_broadcast = optimized_ops::ProcessBroadcastShapes(
       GetTensorShape(op_context.input1), GetTensorShape(op_context.input2),
       &op_params);
@@ -149,11 +201,11 @@ void TFLiteOperation<maximum_minimum::kGenericOptimized, int8, MinimumOp>(
         GetTensorData<int8>(op_context.output), MinimumOp::template op<int8>);
     return;
   }
-  reference_ops::MaximumMinimumBroadcastSlow(
-      GetTensorShape(op_context.input1), GetTensorData<int8>(op_context.input1),
-      GetTensorShape(op_context.input2), GetTensorData<int8>(op_context.input2),
-      GetTensorShape(op_context.output), GetTensorData<int8>(op_context.output),
-      MinimumOp::template op<int8>);
+  optimized_ops::MinimumElementwise(
+      GetTensorShape(op_context.output).FlatSize(), op_params,
+      GetTensorData<int8>(op_context.input1),
+      GetTensorData<int8>(op_context.input2),
+      GetTensorData<int8>(op_context.output));
 }
 
 template <KernelType kernel_type, typename OpType>

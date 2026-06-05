@@ -4587,6 +4587,263 @@ private:
   int input2_;
   int output_;
 };
+
+class BinaryElementwiseOpModel : public SingleOpModel {
+public:
+  BinaryElementwiseOpModel(BuiltinOperator op, TensorType type,
+                           const std::vector<int> &shape) {
+    input1_ = AddInput({type, shape});
+    input2_ = AddInput({type, shape});
+    output_ = AddOutput({type, {}});
+    SetBuiltinOp(op, BuiltinOptions_NONE, 0);
+    SetBypassDefaultDelegates();
+    BuildInterpreter({GetShape(input1_), GetShape(input2_)});
+  }
+
+  int input1() const { return input1_; }
+  int input2() const { return input2_; }
+
+  template <typename T> std::vector<T> GetOutput() {
+    return ExtractVector<T>(output_);
+  }
+
+private:
+  int input1_;
+  int input2_;
+  int output_;
+};
+#endif
+
+TEST(RvvOpsTest, FloatMaximumMinimumRiscvScalarAndRvvMatchReference) {
+  const ArithmeticParams params = {};
+
+  for (int size : Float32M4VectorLengths()) {
+    const std::vector<float> input1 = MakeSpecialFloatInput(size, 0.75f);
+    const std::vector<float> input2 = MakeSpecialFloatInput(size, -1.25f);
+    std::vector<float> scalar(size);
+    std::vector<float> rvv(size);
+    std::vector<float> optimized(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::RiscvScalarMaximumElementwiseFloat(
+        size, input1.data(), input2.data(), scalar.data());
+    optimized_ops::RvvMaximumElementwiseFloat(size, input1.data(),
+                                              input2.data(), rvv.data());
+    optimized_ops::MaximumElementwiseFloat(size, params, input1.data(),
+                                           input2.data(), optimized.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::max(input1[i], input2[i]);
+    }
+    ExpectFloatRelativeNearOrSpecial(scalar, expected);
+    ExpectFloatRelativeNearOrSpecial(rvv, expected);
+    ExpectFloatRelativeNearOrSpecial(optimized, expected);
+
+    optimized_ops::RiscvScalarMinimumElementwiseFloat(
+        size, input1.data(), input2.data(), scalar.data());
+    optimized_ops::RvvMinimumElementwiseFloat(size, input1.data(),
+                                              input2.data(), rvv.data());
+    optimized_ops::MinimumElementwiseFloat(size, params, input1.data(),
+                                           input2.data(), optimized.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::min(input1[i], input2[i]);
+    }
+    ExpectFloatRelativeNearOrSpecial(scalar, expected);
+    ExpectFloatRelativeNearOrSpecial(rvv, expected);
+    ExpectFloatRelativeNearOrSpecial(optimized, expected);
+  }
+}
+
+TEST(RvvOpsTest, FloatMaximumMinimumScalarBroadcastRiscvScalarAndRvvMatchReference) {
+  const ArithmeticParams params = {};
+  constexpr float kBroadcastMax = 1.25f;
+  constexpr float kBroadcastMin = -1.75f;
+
+  for (int size : Float32M4VectorLengths()) {
+    const std::vector<float> input = MakeSpecialFloatInput(size, 0.5f);
+    std::vector<float> scalar(size);
+    std::vector<float> rvv(size);
+    std::vector<float> optimized(size);
+    std::vector<float> expected(size);
+
+    optimized_ops::RiscvScalarMaximumScalarBroadcastFloat(
+        size, kBroadcastMax, input.data(), scalar.data());
+    optimized_ops::RvvMaximumScalarBroadcastFloat(size, kBroadcastMax,
+                                                  input.data(), rvv.data());
+    optimized_ops::MaximumScalarBroadcastFloat(
+        size, params, kBroadcastMax, input.data(), optimized.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::max(kBroadcastMax, input[i]);
+    }
+    ExpectFloatRelativeNearOrSpecial(scalar, expected);
+    ExpectFloatRelativeNearOrSpecial(rvv, expected);
+    ExpectFloatRelativeNearOrSpecial(optimized, expected);
+
+    optimized_ops::RiscvScalarMinimumScalarBroadcastFloat(
+        size, kBroadcastMin, input.data(), scalar.data());
+    optimized_ops::RvvMinimumScalarBroadcastFloat(size, kBroadcastMin,
+                                                  input.data(), rvv.data());
+    optimized_ops::MinimumScalarBroadcastFloat(
+        size, params, kBroadcastMin, input.data(), optimized.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::min(kBroadcastMin, input[i]);
+    }
+    ExpectFloatRelativeNearOrSpecial(scalar, expected);
+    ExpectFloatRelativeNearOrSpecial(rvv, expected);
+    ExpectFloatRelativeNearOrSpecial(optimized, expected);
+  }
+}
+
+TEST(RvvOpsTest, Int8MaximumMinimumRiscvScalarAndRvvMatchReference) {
+  const ArithmeticParams params = {};
+
+  for (int size : Int8M1VectorLengths()) {
+    std::vector<int8_t> input1;
+    std::vector<int8_t> input2;
+    MakeSpecialInt8Inputs(size, &input1, &input2);
+    std::vector<int8_t> scalar(size);
+    std::vector<int8_t> rvv(size);
+    std::vector<int8_t> optimized(size);
+    std::vector<int8_t> expected(size);
+
+    optimized_ops::RiscvScalarMaximumElementwiseInt8(
+        size, input1.data(), input2.data(), scalar.data());
+    optimized_ops::RvvMaximumElementwiseInt8(size, input1.data(),
+                                             input2.data(), rvv.data());
+    optimized_ops::MaximumElementwise(size, params, input1.data(),
+                                      input2.data(), optimized.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::max(input1[i], input2[i]);
+    }
+    EXPECT_THAT(scalar, ElementsAreArray(expected)) << "max scalar size="
+                                                    << size;
+    EXPECT_THAT(rvv, ElementsAreArray(expected)) << "max rvv size=" << size;
+    EXPECT_THAT(optimized, ElementsAreArray(expected)) << "max opt size="
+                                                       << size;
+
+    optimized_ops::RiscvScalarMinimumElementwiseInt8(
+        size, input1.data(), input2.data(), scalar.data());
+    optimized_ops::RvvMinimumElementwiseInt8(size, input1.data(),
+                                             input2.data(), rvv.data());
+    optimized_ops::MinimumElementwise(size, params, input1.data(),
+                                      input2.data(), optimized.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::min(input1[i], input2[i]);
+    }
+    EXPECT_THAT(scalar, ElementsAreArray(expected)) << "min scalar size="
+                                                    << size;
+    EXPECT_THAT(rvv, ElementsAreArray(expected)) << "min rvv size=" << size;
+    EXPECT_THAT(optimized, ElementsAreArray(expected)) << "min opt size="
+                                                       << size;
+  }
+}
+
+TEST(RvvOpsTest, Int8MaximumMinimumScalarBroadcastRiscvScalarAndRvvMatchReference) {
+  const ArithmeticParams params = {};
+  constexpr int8_t kBroadcastMax = -31;
+  constexpr int8_t kBroadcastMin = 45;
+
+  for (int size : Int8M1VectorLengths()) {
+    const std::vector<int8_t> input = MakeInt8Input(size, 141);
+    std::vector<int8_t> scalar(size);
+    std::vector<int8_t> rvv(size);
+    std::vector<int8_t> optimized(size);
+    std::vector<int8_t> expected(size);
+
+    optimized_ops::RiscvScalarMaximumScalarBroadcastInt8(
+        size, kBroadcastMax, input.data(), scalar.data());
+    optimized_ops::RvvMaximumScalarBroadcastInt8(size, kBroadcastMax,
+                                                 input.data(), rvv.data());
+    optimized_ops::MaximumScalarBroadcast(size, params, kBroadcastMax,
+                                          input.data(), optimized.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::max(kBroadcastMax, input[i]);
+    }
+    EXPECT_THAT(scalar, ElementsAreArray(expected)) << "max scalar size="
+                                                    << size;
+    EXPECT_THAT(rvv, ElementsAreArray(expected)) << "max rvv size=" << size;
+    EXPECT_THAT(optimized, ElementsAreArray(expected)) << "max opt size="
+                                                       << size;
+
+    optimized_ops::RiscvScalarMinimumScalarBroadcastInt8(
+        size, kBroadcastMin, input.data(), scalar.data());
+    optimized_ops::RvvMinimumScalarBroadcastInt8(size, kBroadcastMin,
+                                                 input.data(), rvv.data());
+    optimized_ops::MinimumScalarBroadcast(size, params, kBroadcastMin,
+                                          input.data(), optimized.data());
+    for (int i = 0; i < size; ++i) {
+      expected[i] = std::min(kBroadcastMin, input[i]);
+    }
+    EXPECT_THAT(scalar, ElementsAreArray(expected)) << "min scalar size="
+                                                    << size;
+    EXPECT_THAT(rvv, ElementsAreArray(expected)) << "min rvv size=" << size;
+    EXPECT_THAT(optimized, ElementsAreArray(expected)) << "min opt size="
+                                                       << size;
+  }
+}
+
+#ifdef RVV_OPS_TEST_WITH_SINGLE_OP_MODEL
+TEST(RvvOpsTest, MaximumMinimumKernelEntryMatchesScalarAcrossVectorBoundaries) {
+  for (int size : Float32M4VectorLengths()) {
+    if (size == 0) {
+      continue;
+    }
+    const std::vector<float> input1 = MakeSpecialFloatInput(size, 0.25f);
+    const std::vector<float> input2 = MakeSpecialFloatInput(size, -0.75f);
+
+    BinaryElementwiseOpModel max_model(BuiltinOperator_MAXIMUM,
+                                       TensorType_FLOAT32, {size});
+    max_model.PopulateTensor<float>(max_model.input1(), input1);
+    max_model.PopulateTensor<float>(max_model.input2(), input2);
+    ASSERT_EQ(max_model.Invoke(), kTfLiteOk);
+
+    BinaryElementwiseOpModel min_model(BuiltinOperator_MINIMUM,
+                                       TensorType_FLOAT32, {size});
+    min_model.PopulateTensor<float>(min_model.input1(), input1);
+    min_model.PopulateTensor<float>(min_model.input2(), input2);
+    ASSERT_EQ(min_model.Invoke(), kTfLiteOk);
+
+    std::vector<float> expected_max(size);
+    std::vector<float> expected_min(size);
+    for (int i = 0; i < size; ++i) {
+      expected_max[i] = std::max(input1[i], input2[i]);
+      expected_min[i] = std::min(input1[i], input2[i]);
+    }
+    ExpectFloatRelativeNearOrSpecial(max_model.GetOutput<float>(),
+                                     expected_max);
+    ExpectFloatRelativeNearOrSpecial(min_model.GetOutput<float>(),
+                                     expected_min);
+  }
+
+  for (int size : Int8M1VectorLengths()) {
+    if (size == 0) {
+      continue;
+    }
+    std::vector<int8_t> input1;
+    std::vector<int8_t> input2;
+    MakeSpecialInt8Inputs(size, &input1, &input2);
+
+    BinaryElementwiseOpModel max_model(BuiltinOperator_MAXIMUM, TensorType_INT8,
+                                       {size});
+    max_model.PopulateTensor<int8_t>(max_model.input1(), input1);
+    max_model.PopulateTensor<int8_t>(max_model.input2(), input2);
+    ASSERT_EQ(max_model.Invoke(), kTfLiteOk);
+
+    BinaryElementwiseOpModel min_model(BuiltinOperator_MINIMUM, TensorType_INT8,
+                                       {size});
+    min_model.PopulateTensor<int8_t>(min_model.input1(), input1);
+    min_model.PopulateTensor<int8_t>(min_model.input2(), input2);
+    ASSERT_EQ(min_model.Invoke(), kTfLiteOk);
+
+    std::vector<int8_t> expected_max(size);
+    std::vector<int8_t> expected_min(size);
+    for (int i = 0; i < size; ++i) {
+      expected_max[i] = std::max(input1[i], input2[i]);
+      expected_min[i] = std::min(input1[i], input2[i]);
+    }
+    EXPECT_THAT(max_model.GetOutput<int8_t>(), ElementsAreArray(expected_max));
+    EXPECT_THAT(min_model.GetOutput<int8_t>(), ElementsAreArray(expected_min));
+  }
+}
 #endif
 
 TEST(RvvOpsTest, StablehloFloatElementwiseMatchesScalarAcrossVectorBoundaries) {
