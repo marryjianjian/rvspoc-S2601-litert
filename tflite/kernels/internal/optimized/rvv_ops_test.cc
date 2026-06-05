@@ -2711,6 +2711,98 @@ TEST(RvvOpsTest, FloatArgMinLastAxisMatchesReferenceAcrossVectorBoundaries) {
   }
 }
 
+TEST(RvvOpsTest, Int8ArgMaxLastAxisRiscvScalarAndRvvMatchReference) {
+  constexpr int kOuterSize = 3;
+  const int axis[] = {1};
+
+  for (int axis_size : Int8M1VectorLengths()) {
+    if (axis_size == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({kOuterSize, axis_size});
+    const RuntimeShape output_shape({kOuterSize});
+    std::vector<int8_t> input(kOuterSize * axis_size);
+    for (int outer = 0; outer < kOuterSize; ++outer) {
+      for (int i = 0; i < axis_size; ++i) {
+        input[outer * axis_size + i] =
+            static_cast<int8_t>(((outer + 3) * 17 + i * 5) % 91 - 45);
+      }
+      input[outer * axis_size] = 100;
+      if (axis_size > 1) {
+        input[outer * axis_size + axis_size / 2] = 100;
+        input[outer * axis_size + axis_size - 1] = 99;
+      }
+    }
+    std::vector<int32_t> scalar(kOuterSize);
+    std::vector<int32_t> rvv(kOuterSize);
+    std::vector<int32_t> actual(kOuterSize);
+    std::vector<int32_t> expected(kOuterSize);
+
+    for (int outer = 0; outer < kOuterSize; ++outer) {
+      const int8_t* row = input.data() + outer * axis_size;
+      scalar[outer] = optimized_ops::RiscvScalarArgMinMaxValueFirstIndexInt8<
+          /*is_arg_max=*/true>(row, axis_size);
+      rvv[outer] = optimized_ops::RvvArgMinMaxValueFirstIndexInt8<
+          /*is_arg_max=*/true>(row, axis_size);
+    }
+    optimized_ops::ArgMax(input_shape, input.data(), axis, output_shape,
+                          actual.data());
+    reference_ops::ArgMax(input_shape, input.data(), axis, output_shape,
+                          expected.data());
+
+    SCOPED_TRACE(::testing::Message() << "axis_size=" << axis_size);
+    EXPECT_THAT(scalar, ElementsAreArray(expected));
+    EXPECT_THAT(rvv, ElementsAreArray(expected));
+    EXPECT_THAT(actual, ElementsAreArray(expected));
+  }
+}
+
+TEST(RvvOpsTest, Int8ArgMinLastAxisRiscvScalarAndRvvMatchReference) {
+  constexpr int kOuterSize = 3;
+  const int axis[] = {1};
+
+  for (int axis_size : Int8M1VectorLengths()) {
+    if (axis_size == 0) {
+      continue;
+    }
+    const RuntimeShape input_shape({kOuterSize, axis_size});
+    const RuntimeShape output_shape({kOuterSize});
+    std::vector<int8_t> input(kOuterSize * axis_size);
+    for (int outer = 0; outer < kOuterSize; ++outer) {
+      for (int i = 0; i < axis_size; ++i) {
+        input[outer * axis_size + i] =
+            static_cast<int8_t>(((outer + 5) * 13 + i * 7) % 91 - 45);
+      }
+      input[outer * axis_size] = -100;
+      if (axis_size > 1) {
+        input[outer * axis_size + axis_size / 2] = -100;
+        input[outer * axis_size + axis_size - 1] = -99;
+      }
+    }
+    std::vector<int32_t> scalar(kOuterSize);
+    std::vector<int32_t> rvv(kOuterSize);
+    std::vector<int32_t> actual(kOuterSize);
+    std::vector<int32_t> expected(kOuterSize);
+
+    for (int outer = 0; outer < kOuterSize; ++outer) {
+      const int8_t* row = input.data() + outer * axis_size;
+      scalar[outer] = optimized_ops::RiscvScalarArgMinMaxValueFirstIndexInt8<
+          /*is_arg_max=*/false>(row, axis_size);
+      rvv[outer] = optimized_ops::RvvArgMinMaxValueFirstIndexInt8<
+          /*is_arg_max=*/false>(row, axis_size);
+    }
+    optimized_ops::ArgMinMax(input_shape, input.data(), axis, output_shape,
+                             actual.data(), /*is_arg_max=*/false);
+    reference_ops::ArgMinMax(input_shape, input.data(), axis, output_shape,
+                             expected.data(), /*is_arg_max=*/false);
+
+    SCOPED_TRACE(::testing::Message() << "axis_size=" << axis_size);
+    EXPECT_THAT(scalar, ElementsAreArray(expected));
+    EXPECT_THAT(rvv, ElementsAreArray(expected));
+    EXPECT_THAT(actual, ElementsAreArray(expected));
+  }
+}
+
 TEST(RvvOpsTest, FloatSubMatchesReferenceAcrossVectorBoundaries) {
   ArithmeticParams params;
   params.float_activation_min = -3.25f;

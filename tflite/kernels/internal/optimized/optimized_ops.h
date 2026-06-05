@@ -9801,6 +9801,58 @@ inline int RvvArgMinMaxValueFirstIndexFloat(const float* input_data, int size) {
 }
 #endif  // USE_RVV
 
+#if defined(__riscv)
+template <bool is_arg_max>
+inline int RiscvScalarArgMinMaxValueFirstIndexInt8(const int8_t* input_data,
+                                                   int size) {
+  int selected_index = 0;
+  int8_t selected_value = input_data[0];
+  for (int i = 1; i < size; ++i) {
+    const int8_t value = input_data[i];
+    if constexpr (is_arg_max) {
+      if (value > selected_value) {
+        selected_value = value;
+        selected_index = i;
+      }
+    } else {
+      if (value < selected_value) {
+        selected_value = value;
+        selected_index = i;
+      }
+    }
+  }
+  return selected_index;
+}
+#endif  // defined(__riscv)
+
+#if defined(USE_RVV)
+template <bool is_arg_max>
+inline int RvvArgMinMaxValueFirstIndexInt8(const int8_t* input_data,
+                                           int size) {
+  int8_t selected_value =
+      is_arg_max ? std::numeric_limits<int8_t>::lowest()
+                 : std::numeric_limits<int8_t>::max();
+  for (int i = 0; i < size;) {
+    const size_t vl = __riscv_vsetvl_e8m1(size - i);
+    const vint8m1_t input = __riscv_vle8_v_i8m1(input_data + i, vl);
+    vint8m1_t scalar = __riscv_vmv_v_x_i8m1(selected_value, 1);
+    if constexpr (is_arg_max) {
+      scalar = __riscv_vredmax_vs_i8m1_i8m1(input, scalar, vl);
+    } else {
+      scalar = __riscv_vredmin_vs_i8m1_i8m1(input, scalar, vl);
+    }
+    selected_value = __riscv_vmv_x_s_i8m1_i8(scalar);
+    i += vl;
+  }
+  for (int i = 0; i < size; ++i) {
+    if (input_data[i] == selected_value) {
+      return i;
+    }
+  }
+  return 0;
+}
+#endif  // USE_RVV
+
 template <typename T1, typename T2, bool is_arg_max>
 inline void ArgMinMaxLastAxis(const RuntimeShape& input_shape,
                               const T1* input_data,
@@ -9820,7 +9872,21 @@ inline void ArgMinMaxLastAxis(const RuntimeShape& input_shape,
               input_data + outer * axis_size, axis_size));
       continue;
     }
+    if constexpr (std::is_same<T1, int8_t>::value) {
+      output_data[outer] =
+          static_cast<T2>(RvvArgMinMaxValueFirstIndexInt8<is_arg_max>(
+              input_data + outer * axis_size, axis_size));
+      continue;
+    }
 #endif  // USE_RVV
+#if defined(__riscv)
+    if constexpr (std::is_same<T1, int8_t>::value) {
+      output_data[outer] = static_cast<T2>(
+          RiscvScalarArgMinMaxValueFirstIndexInt8<is_arg_max>(
+              input_data + outer * axis_size, axis_size));
+      continue;
+    }
+#endif  // defined(__riscv)
     if (is_arg_max) {
       output_data[outer] = static_cast<T2>(
           ArgMaxVector<T1>(input_data + outer * axis_size, axis_size));
