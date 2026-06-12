@@ -71,9 +71,11 @@ struct Metrics {
   double total_invoke_ms = 0.0;
   double latency_min_ms = 0.0;
   double latency_avg_ms = 0.0;
+  double latency_std_ms = 0.0;
   double latency_p50_ms = 0.0;
   double latency_p90_ms = 0.0;
   double latency_p95_ms = 0.0;
+  double p95_over_avg = 0.0;
   double latency_p99_ms = 0.0;
   double latency_max_ms = 0.0;
   double throughput_inferences_per_second = 0.0;
@@ -334,6 +336,28 @@ double Percentile(std::vector<double> sorted_values, double percentile) {
          sorted_values[upper] * fraction;
 }
 
+double StandardDeviation(const std::vector<double>& values, double mean) {
+  if (values.empty()) {
+    return 0.0;
+  }
+  double squared_diff_sum = 0.0;
+  for (double value : values) {
+    const double diff = value - mean;
+    squared_diff_sum += diff * diff;
+  }
+  return std::sqrt(squared_diff_sum / static_cast<double>(values.size()));
+}
+
+double SafeRatio(double numerator, double denominator) {
+  if (numerator == 0.0 && denominator == 0.0) {
+    return 1.0;
+  }
+  if (denominator == 0.0) {
+    return 0.0;
+  }
+  return numerator / denominator;
+}
+
 bool RunBenchmark(const Options& options, Metrics* metrics) {
   metrics->label = options.label.empty() ? (IsRvvCompiled() ? "rvv" : "no_rvv")
                                          : options.label;
@@ -412,9 +436,13 @@ bool RunBenchmark(const Options& options, Metrics* metrics) {
   metrics->latency_avg_ms =
       std::accumulate(latencies_ms.begin(), latencies_ms.end(), 0.0) /
       static_cast<double>(latencies_ms.size());
+  metrics->latency_std_ms =
+      StandardDeviation(latencies_ms, metrics->latency_avg_ms);
   metrics->latency_p50_ms = Percentile(latencies_ms, 0.50);
   metrics->latency_p90_ms = Percentile(latencies_ms, 0.90);
   metrics->latency_p95_ms = Percentile(latencies_ms, 0.95);
+  metrics->p95_over_avg =
+      SafeRatio(metrics->latency_p95_ms, metrics->latency_avg_ms);
   metrics->latency_p99_ms = Percentile(latencies_ms, 0.99);
   metrics->throughput_inferences_per_second =
       1000.0 * static_cast<double>(options.runs) / metrics->total_invoke_ms;
@@ -451,9 +479,11 @@ bool WriteMetricsFile(const std::string& path, const Metrics& metrics) {
   WriteMetric(out, "total_invoke_ms", metrics.total_invoke_ms);
   WriteMetric(out, "latency_min_ms", metrics.latency_min_ms);
   WriteMetric(out, "latency_avg_ms", metrics.latency_avg_ms);
+  WriteMetric(out, "latency_std_ms", metrics.latency_std_ms);
   WriteMetric(out, "latency_p50_ms", metrics.latency_p50_ms);
   WriteMetric(out, "latency_p90_ms", metrics.latency_p90_ms);
   WriteMetric(out, "latency_p95_ms", metrics.latency_p95_ms);
+  WriteMetric(out, "p95_over_avg", metrics.p95_over_avg);
   WriteMetric(out, "latency_p99_ms", metrics.latency_p99_ms);
   WriteMetric(out, "latency_max_ms", metrics.latency_max_ms);
   WriteMetric(out, "throughput_inferences_per_second",
@@ -485,6 +515,13 @@ bool LoadMetricsFile(const std::string& path, Metrics* metrics) {
     kv[line.substr(0, equals)] = line.substr(equals + 1);
   }
   auto get_double = [&](const char* key) { return std::stod(kv[key]); };
+  auto get_optional_double = [&](const char* key, double default_value) {
+    const auto it = kv.find(key);
+    if (it == kv.end()) {
+      return default_value;
+    }
+    return std::stod(it->second);
+  };
   auto get_i64 = [&](const char* key) { return std::stoll(kv[key]); };
 
   metrics->label = kv["label"];
@@ -494,9 +531,13 @@ bool LoadMetricsFile(const std::string& path, Metrics* metrics) {
   metrics->total_invoke_ms = get_double("total_invoke_ms");
   metrics->latency_min_ms = get_double("latency_min_ms");
   metrics->latency_avg_ms = get_double("latency_avg_ms");
+  metrics->latency_std_ms = get_optional_double("latency_std_ms", 0.0);
   metrics->latency_p50_ms = get_double("latency_p50_ms");
   metrics->latency_p90_ms = get_double("latency_p90_ms");
   metrics->latency_p95_ms = get_double("latency_p95_ms");
+  metrics->p95_over_avg = get_optional_double(
+      "p95_over_avg",
+      SafeRatio(metrics->latency_p95_ms, metrics->latency_avg_ms));
   metrics->latency_p99_ms = get_double("latency_p99_ms");
   metrics->latency_max_ms = get_double("latency_max_ms");
   metrics->throughput_inferences_per_second =
@@ -591,7 +632,8 @@ std::vector<std::string> ChildArgs(const Options& options,
 
 void PrintRow(const char* metric, double rvv, double no_rvv, const char* unit,
               bool higher_is_better) {
-  const double ratio = higher_is_better ? rvv / no_rvv : no_rvv / rvv;
+  const double ratio =
+      higher_is_better ? SafeRatio(rvv, no_rvv) : SafeRatio(no_rvv, rvv);
   std::cout << std::left << std::setw(28) << metric << std::right
             << std::setw(14) << std::fixed << std::setprecision(3) << rvv
             << std::setw(14) << no_rvv << std::setw(10) << unit << std::setw(12)
@@ -614,11 +656,15 @@ void PrintComparison(const Options& options, const Metrics& rvv,
            false);
   PrintRow("latency_avg", rvv.latency_avg_ms, no_rvv.latency_avg_ms, "ms",
            false);
+  PrintRow("latency_std", rvv.latency_std_ms, no_rvv.latency_std_ms, "ms",
+           false);
   PrintRow("latency_p50", rvv.latency_p50_ms, no_rvv.latency_p50_ms, "ms",
            false);
   PrintRow("latency_p90", rvv.latency_p90_ms, no_rvv.latency_p90_ms, "ms",
            false);
   PrintRow("latency_p95", rvv.latency_p95_ms, no_rvv.latency_p95_ms, "ms",
+           false);
+  PrintRow("p95_over_avg", rvv.p95_over_avg, no_rvv.p95_over_avg, "ratio",
            false);
   PrintRow("latency_p99", rvv.latency_p99_ms, no_rvv.latency_p99_ms, "ms",
            false);
@@ -644,9 +690,11 @@ void WriteJsonMetrics(std::ostream& os, const char* name,
   os << "    \"startup_ms\": " << metrics.startup_ms << ",\n";
   os << "    \"first_invoke_ms\": " << metrics.first_invoke_ms << ",\n";
   os << "    \"latency_avg_ms\": " << metrics.latency_avg_ms << ",\n";
+  os << "    \"latency_std_ms\": " << metrics.latency_std_ms << ",\n";
   os << "    \"latency_p50_ms\": " << metrics.latency_p50_ms << ",\n";
   os << "    \"latency_p90_ms\": " << metrics.latency_p90_ms << ",\n";
   os << "    \"latency_p95_ms\": " << metrics.latency_p95_ms << ",\n";
+  os << "    \"p95_over_avg\": " << metrics.p95_over_avg << ",\n";
   os << "    \"latency_p99_ms\": " << metrics.latency_p99_ms << ",\n";
   os << "    \"throughput_inferences_per_second\": "
      << metrics.throughput_inferences_per_second << ",\n";
@@ -675,11 +723,15 @@ bool WriteComparisonJson(const std::string& path, const Options& options,
   WriteJsonMetrics(out, "no_rvv", no_rvv);
   out << ",\n";
   out << "  \"speedup\": {\n";
-  out << "    \"latency_avg\": " << no_rvv.latency_avg_ms / rvv.latency_avg_ms
-      << ",\n";
+  out << "    \"latency_avg\": "
+      << SafeRatio(no_rvv.latency_avg_ms, rvv.latency_avg_ms) << ",\n";
+  out << "    \"latency_std\": "
+      << SafeRatio(no_rvv.latency_std_ms, rvv.latency_std_ms) << ",\n";
+  out << "    \"p95_over_avg\": "
+      << SafeRatio(no_rvv.p95_over_avg, rvv.p95_over_avg) << ",\n";
   out << "    \"throughput\": "
-      << rvv.throughput_inferences_per_second /
-             no_rvv.throughput_inferences_per_second
+      << SafeRatio(rvv.throughput_inferences_per_second,
+                   no_rvv.throughput_inferences_per_second)
       << "\n";
   out << "  }\n";
   out << "}\n";
