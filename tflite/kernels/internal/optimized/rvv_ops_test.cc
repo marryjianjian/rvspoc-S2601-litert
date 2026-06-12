@@ -801,7 +801,7 @@ std::vector<int> VectorLengthsAroundVlmax(int vlmax) {
       vlmax + 1,
       2 * vlmax - 1,
       2 * vlmax,
-      2 * vlmax + 3,
+      2 * vlmax + 1,
   };
   lengths.erase(std::remove_if(lengths.begin(), lengths.end(),
                                [](int length) { return length < 0; }),
@@ -809,6 +809,12 @@ std::vector<int> VectorLengthsAroundVlmax(int vlmax) {
   std::sort(lengths.begin(), lengths.end());
   lengths.erase(std::unique(lengths.begin(), lengths.end()), lengths.end());
   return lengths;
+}
+
+TEST(RvvOpsTest, VectorLengthsAroundVlmaxIncludesStripMiningBoundaries) {
+  const std::vector<int> lengths = VectorLengthsAroundVlmax(8);
+  const std::vector<int> expected = {0, 1, 2, 7, 8, 9, 15, 16, 17};
+  EXPECT_EQ(lengths, expected);
 }
 
 std::vector<int> Float32M4VectorLengths() {

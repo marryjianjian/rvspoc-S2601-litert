@@ -50,6 +50,7 @@ struct Options {
   std::string label;
   std::string result_file;
   std::string json_output;
+  std::string input_dump_path;
   std::string reference_binary;
   std::string rvv_binary;
   std::string scalar_binary;
@@ -92,6 +93,20 @@ struct CompareStats {
   bool top1_pass = false;
   bool element_pass = false;
   bool pass = false;
+};
+
+struct InputDumpTensor {
+  int type = kTfLiteNoType;
+  std::vector<int> shape;
+  std::vector<uint8_t> data;
+};
+
+struct InputDumpSample {
+  std::vector<InputDumpTensor> inputs;
+};
+
+struct InputDump {
+  std::vector<InputDumpSample> samples;
 };
 
 bool IsRvvCompiled() {
@@ -143,6 +158,7 @@ void PrintUsage(const char* argv0) {
       << "  --model=PATH\n"
       << "  --samples=N                         Default: 1\n"
       << "  --num_threads=N                     Default: 1\n"
+      << "  --input_dump=PATH                   Real input tensor dump\n"
       << "  --reference_binary=PATH             Default: this binary\n"
       << "  --rvv_binary=PATH                   Candidate RVV binary\n"
       << "  --scalar_binary=PATH                Candidate scalar binary\n"
@@ -191,6 +207,8 @@ bool ParseOptions(int argc, char** argv, Options* options) {
       options->result_file = value;
     } else if (ConsumeArgValue(&i, argc, argv, arg, "json_output", &value)) {
       options->json_output = value;
+    } else if (ConsumeArgValue(&i, argc, argv, arg, "input_dump", &value)) {
+      options->input_dump_path = value;
     } else if (ConsumeArgValue(&i, argc, argv, arg, "reference_binary",
                                &value)) {
       options->reference_binary = value;
@@ -228,6 +246,136 @@ bool ParseOptions(int argc, char** argv, Options* options) {
     std::cerr << "samples and num_threads must be positive.\n";
     return false;
   }
+  return true;
+}
+
+template <typename T>
+bool ReadBinary(std::istream& in, T* value) {
+  return static_cast<bool>(
+      in.read(reinterpret_cast<char*>(value), sizeof(T)));
+}
+
+bool ReadBytes(std::istream& in, std::vector<uint8_t>* data) {
+  if (data->empty()) {
+    return true;
+  }
+  return static_cast<bool>(
+      in.read(reinterpret_cast<char*>(data->data()), data->size()));
+}
+
+bool LoadInputDump(const std::string& path, InputDump* dump) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    std::cerr << "Failed to open input dump: " << path << "\n";
+    return false;
+  }
+
+  char magic[8] = {};
+  if (!in.read(magic, sizeof(magic)) ||
+      std::memcmp(magic, "RVVINP01", sizeof(magic)) != 0) {
+    std::cerr << "Invalid input dump magic: " << path << "\n";
+    return false;
+  }
+
+  uint32_t sample_count = 0;
+  if (!ReadBinary(in, &sample_count)) {
+    std::cerr << "Failed to read input dump sample count: " << path << "\n";
+    return false;
+  }
+  dump->samples.clear();
+  dump->samples.resize(sample_count);
+
+  for (uint32_t sample = 0; sample < sample_count; ++sample) {
+    uint32_t input_count = 0;
+    if (!ReadBinary(in, &input_count)) {
+      std::cerr << "Failed to read input count for sample " << sample << "\n";
+      return false;
+    }
+    dump->samples[sample].inputs.resize(input_count);
+    for (uint32_t input = 0; input < input_count; ++input) {
+      InputDumpTensor& tensor = dump->samples[sample].inputs[input];
+      int32_t type = kTfLiteNoType;
+      uint32_t rank = 0;
+      if (!ReadBinary(in, &type) || !ReadBinary(in, &rank)) {
+        std::cerr << "Failed to read tensor header for sample " << sample
+                  << ", input " << input << "\n";
+        return false;
+      }
+      tensor.type = type;
+      tensor.shape.resize(rank);
+      for (uint32_t dim = 0; dim < rank; ++dim) {
+        int32_t value = 0;
+        if (!ReadBinary(in, &value)) {
+          std::cerr << "Failed to read tensor shape for sample " << sample
+                    << ", input " << input << "\n";
+          return false;
+        }
+        tensor.shape[dim] = value;
+      }
+      uint64_t byte_size = 0;
+      if (!ReadBinary(in, &byte_size) ||
+          byte_size >
+              static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        std::cerr << "Invalid tensor byte size for sample " << sample
+                  << ", input " << input << "\n";
+        return false;
+      }
+      tensor.data.resize(static_cast<size_t>(byte_size));
+      if (!ReadBytes(in, &tensor.data)) {
+        std::cerr << "Failed to read tensor bytes for sample " << sample
+                  << ", input " << input << "\n";
+        return false;
+      }
+    }
+  }
+
+  char trailing = 0;
+  if (in.read(&trailing, 1)) {
+    std::cerr << "Input dump has trailing bytes: " << path << "\n";
+    return false;
+  }
+  return true;
+}
+
+bool TensorShapeMatches(const TfLiteTensor* tensor,
+                        const std::vector<int>& dump_shape) {
+  if (tensor == nullptr || tensor->dims == nullptr ||
+      tensor->dims->size != static_cast<int>(dump_shape.size())) {
+    return false;
+  }
+  for (int i = 0; i < tensor->dims->size; ++i) {
+    if (tensor->dims->data[i] != dump_shape[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool FillInputFromDump(TfLiteTensor* tensor, const InputDumpTensor& input,
+                       int sample, int input_index) {
+  if (tensor == nullptr || tensor->data.raw == nullptr) {
+    std::cerr << "Missing input tensor storage for sample " << sample
+              << ", input " << input_index << "\n";
+    return false;
+  }
+  if (tensor->type != input.type) {
+    std::cerr << "Input dump type mismatch for sample " << sample
+              << ", input " << input_index << ": model=" << tensor->type
+              << ", dump=" << input.type << "\n";
+    return false;
+  }
+  if (!TensorShapeMatches(tensor, input.shape)) {
+    std::cerr << "Input dump shape mismatch for sample " << sample
+              << ", input " << input_index << "\n";
+    return false;
+  }
+  if (tensor->bytes != input.data.size()) {
+    std::cerr << "Input dump byte size mismatch for sample " << sample
+              << ", input " << input_index << ": model=" << tensor->bytes
+              << ", dump=" << input.data.size() << "\n";
+    return false;
+  }
+  std::memcpy(tensor->data.raw, input.data.data(), input.data.size());
   return true;
 }
 
@@ -346,11 +494,42 @@ bool RunModel(const Options& options, RunResult* result) {
     return false;
   }
 
+  InputDump input_dump;
+  const InputDump* input_dump_ptr = nullptr;
+  if (!options.input_dump_path.empty()) {
+    if (!LoadInputDump(options.input_dump_path, &input_dump)) {
+      return false;
+    }
+    if (input_dump.samples.size() < static_cast<size_t>(options.samples)) {
+      std::cerr << "Input dump has " << input_dump.samples.size()
+                << " samples, but --samples=" << options.samples << "\n";
+      return false;
+    }
+    input_dump_ptr = &input_dump;
+  }
+
   result->samples.clear();
   result->samples.reserve(options.samples);
   for (int sample = 0; sample < options.samples; ++sample) {
-    for (int input_index : interpreter->inputs()) {
-      FillTensor(interpreter->tensor(input_index), sample);
+    const std::vector<int>& inputs = interpreter->inputs();
+    if (input_dump_ptr != nullptr &&
+        input_dump_ptr->samples[sample].inputs.size() != inputs.size()) {
+      std::cerr << "Input dump input count mismatch for sample " << sample
+                << ": model=" << inputs.size() << ", dump="
+                << input_dump_ptr->samples[sample].inputs.size() << "\n";
+      return false;
+    }
+    for (size_t input = 0; input < inputs.size(); ++input) {
+      TfLiteTensor* tensor = interpreter->tensor(inputs[input]);
+      if (input_dump_ptr != nullptr) {
+        if (!FillInputFromDump(tensor,
+                               input_dump_ptr->samples[sample].inputs[input],
+                               sample, static_cast<int>(input))) {
+          return false;
+        }
+      } else {
+        FillTensor(tensor, sample);
+      }
     }
     if (interpreter->Invoke() != kTfLiteOk) {
       std::cerr << "Invoke failed at sample " << sample << ".\n";
@@ -543,7 +722,7 @@ CompareStats CompareToReference(const RunResult& reference,
 std::vector<std::string> ChildArgs(const Options& options,
                                    const std::string& label,
                                    const std::string& result_file) {
-  return {
+  std::vector<std::string> args = {
       "--mode=run",
       "--label=" + label,
       "--model=" + options.model_path,
@@ -551,6 +730,10 @@ std::vector<std::string> ChildArgs(const Options& options,
       "--num_threads=" + std::to_string(options.num_threads),
       "--result_file=" + result_file,
   };
+  if (!options.input_dump_path.empty()) {
+    args.push_back("--input_dump=" + options.input_dump_path);
+  }
+  return args;
 }
 
 int RunProcess(const std::string& program, const std::string& runner,
