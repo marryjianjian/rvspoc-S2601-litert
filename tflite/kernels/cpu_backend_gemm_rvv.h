@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_CPU_BACKEND_GEMM_RVV_H_
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
@@ -119,65 +120,30 @@ inline bool RvvFloatGemm(const MatrixParams<float>& lhs_params,
   const int rows = dst_params.rows;
   const int cols = dst_params.cols;
   const int depth = lhs_params.cols;
-  const size_t acc_vl = __riscv_vsetvl_e32m4(depth);
-  constexpr int kRowsPerBlock = 4;
   for (int col = 0; col < cols; ++col) {
     const float* rhs_col = rhs_data + col * depth;
     float* dst_col = dst_data + col * rows;
-    int row = 0;
-    for (; row <= rows - kRowsPerBlock; row += kRowsPerBlock) {
-      const float* lhs_row0 = lhs_data + row * depth;
-      const float* lhs_row1 = lhs_row0 + depth;
-      const float* lhs_row2 = lhs_row1 + depth;
-      const float* lhs_row3 = lhs_row2 + depth;
-      vfloat32m4_t acc0 = __riscv_vfmv_v_f_f32m4(0.0f, acc_vl);
-      vfloat32m4_t acc1 = __riscv_vfmv_v_f_f32m4(0.0f, acc_vl);
-      vfloat32m4_t acc2 = __riscv_vfmv_v_f_f32m4(0.0f, acc_vl);
-      vfloat32m4_t acc3 = __riscv_vfmv_v_f_f32m4(0.0f, acc_vl);
-      for (int d = 0; d < depth;) {
-        const size_t vl = __riscv_vsetvl_e32m4(depth - d);
-        const vfloat32m4_t rhs = __riscv_vle32_v_f32m4(rhs_col + d, vl);
-        acc0 = __riscv_vfmacc_vv_f32m4_tu(
-            acc0, __riscv_vle32_v_f32m4(lhs_row0 + d, vl), rhs, vl);
-        acc1 = __riscv_vfmacc_vv_f32m4_tu(
-            acc1, __riscv_vle32_v_f32m4(lhs_row1 + d, vl), rhs, vl);
-        acc2 = __riscv_vfmacc_vv_f32m4_tu(
-            acc2, __riscv_vle32_v_f32m4(lhs_row2 + d, vl), rhs, vl);
-        acc3 = __riscv_vfmacc_vv_f32m4_tu(
-            acc3, __riscv_vle32_v_f32m4(lhs_row3 + d, vl), rhs, vl);
-        d += vl;
+    for (int row = 0; row < rows;) {
+      const size_t vl = __riscv_vsetvl_e32m4(rows - row);
+      vfloat32m4_t acc = __riscv_vfmv_v_f_f32m4(0.0f, vl);
+      const float* lhs_block = lhs_data + row * depth;
+      const ptrdiff_t lhs_stride =
+          depth * static_cast<ptrdiff_t>(sizeof(float));
+      // Keep each output lane accumulating in depth order. Reducing across the
+      // depth dimension changes FP32 rounding enough to affect model precision.
+      for (int d = 0; d < depth; ++d) {
+        const vfloat32m4_t lhs =
+            __riscv_vlse32_v_f32m4(lhs_block + d, lhs_stride, vl);
+        acc = __riscv_vfmacc_vf_f32m4(acc, rhs_col[d], lhs, vl);
       }
-      float reduced[kRowsPerBlock] = {
-          RvvReduceSum(acc0, acc_vl),
-          RvvReduceSum(acc1, acc_vl),
-          RvvReduceSum(acc2, acc_vl),
-          RvvReduceSum(acc3, acc_vl),
-      };
-      for (int i = 0; i < kRowsPerBlock; ++i) {
-        if (params.bias != nullptr) {
-          reduced[i] += params.bias[row + i];
-        }
-        reduced[i] =
-            std::max(params.clamp_min, std::min(params.clamp_max, reduced[i]));
-        dst_col[row + i] = reduced[i];
-      }
-    }
-    for (; row < rows; ++row) {
-      const float* lhs_row = lhs_data + row * depth;
-      vfloat32m4_t acc = __riscv_vfmv_v_f_f32m4(0.0f, acc_vl);
-      for (int d = 0; d < depth;) {
-        const size_t vl = __riscv_vsetvl_e32m4(depth - d);
-        const vfloat32m4_t lhs = __riscv_vle32_v_f32m4(lhs_row + d, vl);
-        const vfloat32m4_t rhs = __riscv_vle32_v_f32m4(rhs_col + d, vl);
-        acc = __riscv_vfmacc_vv_f32m4_tu(acc, lhs, rhs, vl);
-        d += vl;
-      }
-      float reduced = RvvReduceSum(acc, acc_vl);
       if (params.bias != nullptr) {
-        reduced += params.bias[row];
+        const vfloat32m4_t bias = __riscv_vle32_v_f32m4(params.bias + row, vl);
+        acc = __riscv_vfadd_vv_f32m4(acc, bias, vl);
       }
-      reduced = std::max(params.clamp_min, std::min(params.clamp_max, reduced));
-      dst_col[row] = reduced;
+      acc = __riscv_vfmax_vf_f32m4(acc, params.clamp_min, vl);
+      acc = __riscv_vfmin_vf_f32m4(acc, params.clamp_max, vl);
+      __riscv_vse32_v_f32m4(dst_col + row, acc, vl);
+      row += vl;
     }
   }
   return true;
