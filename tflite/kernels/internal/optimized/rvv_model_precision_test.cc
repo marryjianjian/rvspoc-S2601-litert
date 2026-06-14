@@ -51,6 +51,7 @@ struct Options {
   std::string result_file;
   std::string json_output;
   std::string input_dump_path;
+  std::string tensor_dump_path;
   std::string reference_binary;
   std::string rvv_binary;
   std::string scalar_binary;
@@ -168,6 +169,7 @@ void PrintUsage(const char* argv0) {
       << "  --reference_runner_arg=ARG          Repeatable\n"
       << "  --json_output=PATH\n"
       << "  --result_file=PATH                  Internal run output\n"
+      << "  --tensor_dump=PATH                  Internal tensor dump output\n"
       << "  --label=NAME                        Internal run label\n";
 }
 
@@ -209,6 +211,8 @@ bool ParseOptions(int argc, char** argv, Options* options) {
       options->json_output = value;
     } else if (ConsumeArgValue(&i, argc, argv, arg, "input_dump", &value)) {
       options->input_dump_path = value;
+    } else if (ConsumeArgValue(&i, argc, argv, arg, "tensor_dump", &value)) {
+      options->tensor_dump_path = value;
     } else if (ConsumeArgValue(&i, argc, argv, arg, "reference_binary",
                                &value)) {
       options->reference_binary = value;
@@ -253,6 +257,12 @@ template <typename T>
 bool ReadBinary(std::istream& in, T* value) {
   return static_cast<bool>(
       in.read(reinterpret_cast<char*>(value), sizeof(T)));
+}
+
+template <typename T>
+bool WriteBinary(std::ostream& out, const T& value) {
+  return static_cast<bool>(
+      out.write(reinterpret_cast<const char*>(&value), sizeof(T)));
 }
 
 bool ReadBytes(std::istream& in, std::vector<uint8_t>* data) {
@@ -376,6 +386,59 @@ bool FillInputFromDump(TfLiteTensor* tensor, const InputDumpTensor& input,
     return false;
   }
   std::memcpy(tensor->data.raw, input.data.data(), input.data.size());
+  return true;
+}
+
+bool WriteTensorDumpHeader(std::ostream& out, int samples) {
+  const char magic[8] = {'R', 'V', 'V', 'T', 'E', 'N', '0', '1'};
+  const uint32_t sample_count = static_cast<uint32_t>(samples);
+  return static_cast<bool>(out.write(magic, sizeof(magic))) &&
+         WriteBinary(out, sample_count);
+}
+
+bool WriteTensorDumpSample(std::ostream& out,
+                           const tflite::Interpreter& interpreter) {
+  const uint32_t tensor_count =
+      static_cast<uint32_t>(interpreter.tensors_size());
+  if (!WriteBinary(out, tensor_count)) {
+    return false;
+  }
+  for (uint32_t tensor_index = 0; tensor_index < tensor_count; ++tensor_index) {
+    const TfLiteTensor* tensor =
+        interpreter.tensor(static_cast<int>(tensor_index));
+    const int32_t type = tensor == nullptr ? kTfLiteNoType : tensor->type;
+    const uint32_t rank =
+        tensor == nullptr || tensor->dims == nullptr
+            ? 0
+            : static_cast<uint32_t>(tensor->dims->size);
+    const uint64_t byte_size =
+        tensor == nullptr || tensor->data.raw == nullptr
+            ? 0
+            : static_cast<uint64_t>(tensor->bytes);
+    const char* raw_name =
+        tensor == nullptr || tensor->name == nullptr ? "" : tensor->name;
+    const std::string name(raw_name);
+    const uint32_t name_size = static_cast<uint32_t>(name.size());
+
+    if (!WriteBinary(out, tensor_index) || !WriteBinary(out, type) ||
+        !WriteBinary(out, rank)) {
+      return false;
+    }
+    for (uint32_t dim = 0; dim < rank; ++dim) {
+      const int32_t value = tensor->dims->data[dim];
+      if (!WriteBinary(out, value)) {
+        return false;
+      }
+    }
+    if (!WriteBinary(out, byte_size) || !WriteBinary(out, name_size) ||
+        !out.write(name.data(), name.size())) {
+      return false;
+    }
+    if (byte_size != 0 &&
+        !out.write(tensor->data.raw, static_cast<std::streamsize>(byte_size))) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -508,6 +571,21 @@ bool RunModel(const Options& options, RunResult* result) {
     input_dump_ptr = &input_dump;
   }
 
+  std::ofstream tensor_dump;
+  if (!options.tensor_dump_path.empty()) {
+    tensor_dump.open(options.tensor_dump_path, std::ios::binary);
+    if (!tensor_dump) {
+      std::cerr << "Failed to open tensor dump: "
+                << options.tensor_dump_path << "\n";
+      return false;
+    }
+    if (!WriteTensorDumpHeader(tensor_dump, options.samples)) {
+      std::cerr << "Failed to write tensor dump header: "
+                << options.tensor_dump_path << "\n";
+      return false;
+    }
+  }
+
   result->samples.clear();
   result->samples.reserve(options.samples);
   for (int sample = 0; sample < options.samples; ++sample) {
@@ -533,6 +611,12 @@ bool RunModel(const Options& options, RunResult* result) {
     }
     if (interpreter->Invoke() != kTfLiteOk) {
       std::cerr << "Invoke failed at sample " << sample << ".\n";
+      return false;
+    }
+    if (tensor_dump.is_open() &&
+        !WriteTensorDumpSample(tensor_dump, *interpreter)) {
+      std::cerr << "Failed to write tensor dump sample " << sample << ": "
+                << options.tensor_dump_path << "\n";
       return false;
     }
     SampleResult sample_result;
