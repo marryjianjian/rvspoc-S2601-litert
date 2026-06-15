@@ -31,6 +31,16 @@ namespace tflite {
 namespace optimized_integer_ops {
 
 #if defined(USE_RVV) && !TFLITE_SINGLE_ROUNDING
+inline int32_t RvvApplyConvQuantizedMultiplier(int32_t x, int32_t multiplier,
+                                               int shift) {
+  const int total_shift = 31 - shift;
+  const int64_t round = int64_t{1} << (total_shift - 1);
+  const int64_t result =
+      (static_cast<int64_t>(x) * static_cast<int64_t>(multiplier) + round) >>
+      total_shift;
+  return static_cast<int32_t>(result);
+}
+
 inline int32_t RvvConvDotProductInt8(const int8_t* filter_data,
                                      const int8_t* input_data, int size,
                                      int32_t input_offset) {
@@ -79,8 +89,8 @@ inline bool RvvConvPerChannelGemmInt8(
       if (bias_data) {
         acc += bias_data[row];
       }
-      acc = MultiplyByQuantizedMultiplier(acc, output_multiplier[row],
-                                          output_shift[row]);
+      acc = RvvApplyConvQuantizedMultiplier(acc, output_multiplier[row],
+                                            output_shift[row]);
       acc += params.output_offset;
       acc = std::max(acc, params.quantized_activation_min);
       acc = std::min(acc, params.quantized_activation_max);
