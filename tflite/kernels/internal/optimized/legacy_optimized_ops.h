@@ -1149,7 +1149,7 @@ inline void FullyConnected(
       filter_offset, input_offset, output_pipeline);
 }
 
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
 // In the common case of batch size 1, a fully-connected node degenerates
 // to a matrix*vector product. LSTM cells contain a fully-connected node;
 // when quantized, this becomes a special type of GEMV operation where
@@ -1342,7 +1342,7 @@ inline void GEMVForLstmCell(const RuntimeShape& input_shape,
 }
 #endif
 
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
 inline void GEMVForLstmCellWithSymmetricRange(
     const RuntimeShape& input_shape, const uint8* input_data,
     const RuntimeShape& weights_shape, const uint8* weights_data,
@@ -1673,7 +1673,7 @@ inline void FullyConnected(
   // 32bit integers, and the output is 16-bit fixed-point with 3 integer bits so
   // the output range is [-2^3, 2^3] == [-8, 8]. The rationale for that
   // is explained in the function comment above.
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   if (batches == 1 && input_offset == -128 && output_activation_min == -32768 &&
       output_activation_max == 32767) {
     if (filter_offset == -128 && !(output_depth % 4) && !(accum_depth % 64)) {
@@ -2148,7 +2148,7 @@ inline void FullyConnected(
   }
 #endif  // USE_NEON
 
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   const int filter_rows = filter_shape.Dims(filter_dim_count - 2);
   const int filter_cols = filter_shape.Dims(filter_dim_count - 1);
   TFLITE_DCHECK_EQ(filter_shape.FlatSize(), filter_rows * filter_cols);
@@ -3221,7 +3221,7 @@ inline void LstmCell(
   // the output range is [-2^3, 2^3] == [-8, 8]. The rationale for that
   // is explained in the function comment above.
   bool gemm_already_performed = false;
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   if (fc_batches == 1 && !(fc_output_depth % 4) && !(fc_accum_depth % 8)) {
     GEMVForLstmCell(concat_temp_shape, concat_temp_data_uint8, weights_shape,
                     weights_data_uint8, weights_zero_point, bias_shape,
@@ -3270,7 +3270,7 @@ inline void LstmCell(
 
   for (int b = 0; b < outer_size; ++b) {
     int c = 0;
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
     for (; c <= output_depth - 8; c += 8) {
       // Define the fixed-point data types that we will use here. All use
       // int16 as the underlying integer type i.e. all are 16-bit fixed-point.

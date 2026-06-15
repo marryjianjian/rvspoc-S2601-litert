@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 
-#if __aarch64__ && __clang__
+#if __aarch64__ && __clang__ && !defined(TFLITE_DISABLE_ARM_NEON)
 #include <arm_neon.h>
 #endif
 
@@ -50,7 +50,7 @@ inline void RvvLookupTable(const uint8_t *input_data, int num_elements,
 inline void LookupTable(const uint8_t *input_data, int num_elements,
                         const uint8_t *lut, uint8_t *output_data) {
   int i = 0;
-#if __aarch64__ && __clang__
+#if __aarch64__ && __clang__ && !defined(TFLITE_DISABLE_ARM_NEON)
   // This code uses ARM64-only instructions.
   // TODO(b/143709993): Port to ARMv7
 

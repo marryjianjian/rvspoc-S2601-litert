@@ -133,12 +133,6 @@ void Gemm(const MatrixParams<LhsScalar>& lhs_params, const LhsScalar* lhs_data,
     TFLITE_DCHECK(false);
     return;
   }
-#if defined(TFLITE_RISCV_SCALAR_BASELINE)
-  if (detail::ScalarGemm(lhs_params, lhs_data, rhs_params, rhs_data,
-                         dst_params, dst_data, params)) {
-    return;
-  }
-#endif
   if constexpr (std::is_same<LhsScalar, float>::value &&
                 std::is_same<RhsScalar, float>::value &&
                 std::is_same<AccumScalar, float>::value &&
@@ -148,6 +142,13 @@ void Gemm(const MatrixParams<LhsScalar>& lhs_params, const LhsScalar* lhs_data,
                              dst_params, dst_data, params)) {
       return;
     }
+  } else {
+#if defined(TFLITE_RISCV_SCALAR_BASELINE)
+    if (detail::ScalarGemm(lhs_params, lhs_data, rhs_params, rhs_data,
+                           dst_params, dst_data, params)) {
+      return;
+    }
+#endif
   }
   if constexpr ((std::is_same<LhsScalar, std::int8_t>::value ||
                  std::is_same<LhsScalar, std::uint8_t>::value) &&

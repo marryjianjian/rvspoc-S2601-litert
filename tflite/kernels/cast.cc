@@ -32,7 +32,7 @@ limitations under the License.
 #include "tflite/types/fp16.h"
 #include "tflite/types/half.h"
 
-#ifdef __ARM_NEON
+#if defined(__ARM_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
 #include <arm_neon.h>
 #endif
 
@@ -191,7 +191,7 @@ TfLiteStatus castInt4ToFloat(TfLiteContext* context, const TfLiteTensor* in,
   const int8_t* in_data = (const int8_t*)in->data.data;
   float* out_data = (float*)out->data.data;
   int i = 0;
-#ifdef __ARM_NEON
+#if defined(__ARM_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   for (; i + 16 <= num_elements / 2; i += 16) {
     const int8x16_t v0_32 = vld1q_s8(&in_data[i]);
     const int8x16_t v0_32_low = vshrq_n_s8(vshlq_n_s8(v0_32, 4), 4);

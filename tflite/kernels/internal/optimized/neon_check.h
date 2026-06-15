@@ -15,7 +15,8 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_NEON_CHECK_H_
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_OPTIMIZED_NEON_CHECK_H_
 
-#if defined(__ARM_NEON__) || defined(__ARM_NEON)
+#if (defined(__ARM_NEON__) || defined(__ARM_NEON)) && \
+    !defined(TFLITE_DISABLE_ARM_NEON)
 #define USE_NEON
 #include <arm_neon.h>  // IWYU pragma: export
 #endif

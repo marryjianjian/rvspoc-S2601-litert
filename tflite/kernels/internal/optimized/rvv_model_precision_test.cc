@@ -540,6 +540,9 @@ bool RunModel(const Options& options, RunResult* result) {
 
   tflite::ops::builtin::BuiltinOpResolverWithoutDefaultDelegates resolver;
   tflite::InterpreterOptions interpreter_options;
+  if (!options.tensor_dump_path.empty()) {
+    interpreter_options.SetPreserveAllTensors(true);
+  }
   tflite::InterpreterBuilder builder(*model, resolver, &interpreter_options);
   if (builder.SetNumThreads(options.num_threads) != kTfLiteOk) {
     std::cerr << "Failed to set num_threads=" << options.num_threads << "\n";

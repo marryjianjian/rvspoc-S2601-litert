@@ -67,7 +67,7 @@ limitations under the License.
 #include "tflite/kernels/internal/types.h"
 #include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 
-#if __aarch64__ && __clang__
+#if __aarch64__ && __clang__ && !defined(TFLITE_DISABLE_ARM_NEON)
 #define TFLITE_SOFTMAX_USE_UINT16_LUT
 #endif
 
@@ -3620,7 +3620,7 @@ inline void LstmCell(
 
   for (int b = 0; b < outer_size; ++b) {
     int c = 0;
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
     for (; c <= output_depth - 8; c += 8) {
       // Define the fixed-point data types that we will use here. All use
       // int16_t as the underlying integer type i.e. all are 16-bit fixed-point.
@@ -5496,7 +5496,7 @@ inline void Logistic(const LogisticParams& params,
   int c = 0;
   const int16_t* input_data_ptr = input_data;
   int16_t* output_data_ptr = output_data;
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   {
     // F0 uses 0 integer bits, range [-1, 1].
     // This is the return type of math functions such as tanh, logistic,
@@ -5620,7 +5620,7 @@ inline void Tanh(const TanhParams& params, const RuntimeShape& input_shape,
   int c = 0;
   const int16_t* input_data_ptr = input_data;
   int16_t* output_data_ptr = output_data;
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   {
     // F0 uses 0 integer bits, range [-1, 1].
     // This is the return type of math functions such as tanh, logistic,
@@ -8035,7 +8035,7 @@ inline void HardSwish(const HardSwishParams& params,
   // running that over just plain reference code.
   //
   // TODO(b/137199585): revisit when this is fixed.
-#ifdef __ARM_NEON
+#if defined(__ARM_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   const int16x8_t positive_reluish_multiplier_exponent_minus_one =
       vdupq_n_s16(std::max(0, params.reluish_multiplier_exponent - 1));
   const int16x8_t positive_reluish_multiplier_exponent_last_bit =
@@ -8668,7 +8668,7 @@ inline void AffineQuantize(const tflite::QuantizationParams& op_params,
 // TODO(b/139252020): Replace GEMMLOWP_NEON with USE_NEON when the bug is fixed.
 // The converted versions of gemmlowp::tanh and gemmlowp::logistic, done by
 // arm_sse_2_neon.h, produce incorrect results with int16x8_t data types.
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
 
 inline int16x8x4_t SaturatingRounding(
     int16x8_t input_val_0, int16x8_t input_val_1, int16x8_t input_val_2,
@@ -8832,7 +8832,7 @@ inline void Tanh16bitPrecision(const TanhParams& params,
 // TODO(b/139252020): Replace GEMMLOWP_NEON with USE_NEON when the bug is fixed.
 // The converted versions of gemmlowp::tanh and gemmlowp::logistic, done by
 // arm_sse_2_neon.h, produce incorrect results with int16x8_t data types.
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   const int16x8_t range_radius_dup = vdupq_n_s16(input_range_radius);
   const int16x8_t neg_range_radius_dup = vdupq_n_s16(-input_range_radius);
   const int16x8_t output_zero_point_s16 = vdupq_n_s16(output_zero_point);
@@ -8939,7 +8939,7 @@ inline void Tanh16bitPrecision(const TanhParams& params,
 // TODO(b/139252020): Replace GEMMLOWP_NEON with USE_NEON when the bug is fixed.
 // The converted versions of gemmlowp::tanh and gemmlowp::logistic, done by
 // arm_sse_2_neon.h, produce incorrect results with int16x8_t data types.
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   const int16x8_t range_radius_dup = vdupq_n_s16(input_range_radius);
   const int16x8_t neg_range_radius_dup = vdupq_n_s16(-input_range_radius);
 
@@ -9032,7 +9032,7 @@ inline void Logistic16bitPrecision(const LogisticParams& params,
 // TODO(b/139252020): Replace GEMMLOWP_NEON with USE_NEON when the bug is fixed.
 // The converted versions of gemmlowp::tanh and gemmlowp::logistic, done by
 // arm_sse_2_neon.h, produce incorrect results with int16x8_t data types.
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   const int16x8_t range_radius_dup = vdupq_n_s16(input_range_radius);
   const int16x8_t neg_range_radius_dup = vdupq_n_s16(-input_range_radius);
 
@@ -9126,7 +9126,7 @@ inline void Logistic16bitPrecision(const LogisticParams& params,
 // TODO(b/139252020): Replace GEMMLOWP_NEON with USE_NEON when the bug is fixed.
 // The converted versions of gemmlowp::tanh and gemmlowp::logistic, done by
 // arm_sse_2_neon.h, produce incorrect results with int16x8_t data types.
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   const int16x8_t range_radius_dup = vdupq_n_s16(input_range_radius);
   const int16x8_t neg_range_radius_dup = vdupq_n_s16(-input_range_radius);
   const int16x8_t output_zero_point_dup = vdupq_n_s16(output_zero_point);

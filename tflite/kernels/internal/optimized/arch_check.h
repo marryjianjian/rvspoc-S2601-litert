@@ -19,7 +19,8 @@ limitations under the License.
 // This header provides a unified way to detect and use SIMD/vector extensions
 
 // ARM NEON detection
-#if defined(__ARM_NEON__) || defined(__ARM_NEON)
+#if (defined(__ARM_NEON__) || defined(__ARM_NEON)) && \
+    !defined(TFLITE_DISABLE_ARM_NEON)
 #define TFLITE_USE_NEON
 #include <arm_neon.h>
 #endif

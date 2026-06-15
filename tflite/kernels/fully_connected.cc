@@ -1982,11 +1982,7 @@ TfLiteStatus EvalFloat(TfLiteContext* context, TfLiteNode* node,
 
 template <KernelType kernel_type>
 TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
-#if defined(TFLITE_RISCV_SCALAR_BASELINE)
-  constexpr KernelType effective_kernel_type = kReference;
-#else
   constexpr KernelType effective_kernel_type = kernel_type;
-#endif
   auto* params =
       reinterpret_cast<TfLiteFullyConnectedParams*>(node->builtin_data);
   OpData* data = reinterpret_cast<OpData*>(node->user_data);

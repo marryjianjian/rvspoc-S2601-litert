@@ -177,7 +177,7 @@ inline int32x4x2_t MultiplyByQuantizedMultiplier2Rows(
   int32x4x2_t result;
   // The vector type support for SaturatingRoundingDoublingHighMulth in gemmlowp
   // is limited to NEON.
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
   const int32x4_t left_shifted_one_dup = vdupq_n_s32(1 << left_shift);
   result.val[0] =
       RoundingDivideByPOT(SaturatingRoundingDoublingHighMul(
@@ -1652,7 +1652,7 @@ void NeonApplySigmoid(const int16_t* input, int32_t n_batch, int32_t n_input,
                       int16_t* output) {
   for (int batch = 0; batch < n_batch; ++batch) {
     int i = 0;
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
     // F0 uses 0 integer bits, range [-1, 1].
     // This is the return type of math functions such as tanh, logistic,
     // whose range is in [-1, 1].
@@ -1692,7 +1692,7 @@ void NeonApplyTanhImpl(const int16_t* input, int32_t n_batch, int32_t n_input,
                        int16_t* output) {
   for (int batch = 0; batch < n_batch; ++batch) {
     int i = 0;
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
     // F0 uses 0 integer bits, range [-1, 1].
     // This is the return type of math functions such as tanh, logistic,
     // whose range is in [-1, 1].

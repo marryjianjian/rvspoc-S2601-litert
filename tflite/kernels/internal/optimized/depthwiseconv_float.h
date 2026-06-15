@@ -909,9 +909,8 @@ inline void FloatDepthwiseConvAccumRowRvvDepthMultiplier1(
             __riscv_vle32_v_f32m4(input_ptr + channel, vl);
         const vfloat32m4_t filter =
             __riscv_vle32_v_f32m4(filter_base_ptr + channel, vl);
-        const vfloat32m4_t product = __riscv_vfmul_vv_f32m4(input, filter, vl);
         vfloat32m4_t acc = __riscv_vle32_v_f32m4(acc_buffer_ptr + channel, vl);
-        acc = __riscv_vfadd_vv_f32m4(acc, product, vl);
+        acc = __riscv_vfmacc_vv_f32m4(acc, input, filter, vl);
         __riscv_vse32_v_f32m4(acc_buffer_ptr + channel, acc, vl);
         channel += vl;
       }

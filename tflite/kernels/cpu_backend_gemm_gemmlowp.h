@@ -144,7 +144,7 @@ struct GemmImplUsingGemmlowp<LhsScalar, RhsScalar, AccumScalar, DstScalar,
       CpuBackendContext* context) {
     // gemmlowp support for this per-channel path is limited to NEON.
     // We fall back to ruy outside of NEON.
-#ifdef GEMMLOWP_NEON
+#if defined(GEMMLOWP_NEON) && !defined(TFLITE_DISABLE_ARM_NEON)
     gemmlowp::MatrixMap<const SrcScalar, gemmlowp::MapOrder::RowMajor>
         gemmlowp_lhs(lhs_data, lhs_params.rows, lhs_params.cols);
     gemmlowp::MatrixMap<const SrcScalar, gemmlowp::MapOrder::ColMajor>

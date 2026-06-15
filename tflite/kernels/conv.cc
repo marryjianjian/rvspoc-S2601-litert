@@ -1285,11 +1285,7 @@ TfLiteStatus EvalHybrid(TfLiteContext* context, TfLiteNode* node,
 
 template <KernelType kernel_type, TfLiteType input_type>
 TfLiteStatus EvalImpl(TfLiteContext* context, TfLiteNode* node) {
-#if defined(TFLITE_RISCV_SCALAR_BASELINE)
-  constexpr KernelType effective_kernel_type = kReference;
-#else
   constexpr KernelType effective_kernel_type = kernel_type;
-#endif
   auto* params = reinterpret_cast<TfLiteConvParams*>(node->builtin_data);
   OpData* data = reinterpret_cast<OpData*>(node->user_data);
 
