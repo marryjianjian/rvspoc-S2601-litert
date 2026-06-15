@@ -52,6 +52,17 @@ inline int32_t ScalarValueMinusZeroPoint(Scalar value, Scalar zero_point) {
   return static_cast<int32_t>(value) - static_cast<int32_t>(zero_point);
 }
 
+inline int32_t ScalarApplyGemmQuantizedMultiplier(int32_t x,
+                                                  int32_t multiplier,
+                                                  int shift) {
+  const int total_shift = 31 - shift;
+  const int64_t round = int64_t{1} << (total_shift - 1);
+  const int64_t result =
+      (static_cast<int64_t>(x) * static_cast<int64_t>(multiplier) + round) >>
+      total_shift;
+  return static_cast<int32_t>(result);
+}
+
 template <typename DstScalar, QuantizationFlavor quantization_flavor>
 inline DstScalar ScalarFinalizeQuantizedAccumulator(
     int32_t acc, int row, const MatrixParams<DstScalar>& dst_params,
@@ -72,7 +83,11 @@ inline DstScalar ScalarFinalizeQuantizedAccumulator(
     shift = params.multiplier_exponent_perchannel[row];
   }
 
-  acc = MultiplyByQuantizedMultiplier(acc, multiplier, shift);
+  if constexpr (std::is_same<DstScalar, std::int8_t>::value) {
+    acc = ScalarApplyGemmQuantizedMultiplier(acc, multiplier, shift);
+  } else {
+    acc = MultiplyByQuantizedMultiplier(acc, multiplier, shift);
+  }
   acc += static_cast<int32_t>(dst_params.zero_point);
   acc = std::max(acc, static_cast<int32_t>(params.clamp_min));
   acc = std::min(acc, static_cast<int32_t>(params.clamp_max));

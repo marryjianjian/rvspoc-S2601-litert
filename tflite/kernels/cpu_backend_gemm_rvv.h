@@ -56,6 +56,16 @@ inline int32_t RvvReduceSum(vint32m4_t values, size_t vl) {
   return __riscv_vmv_x_s_i32m1_i32(reduced);
 }
 
+inline int32_t RvvApplyGemmQuantizedMultiplier(int32_t x, int32_t multiplier,
+                                               int shift) {
+  const int total_shift = 31 - shift;
+  const int64_t round = int64_t{1} << (total_shift - 1);
+  const int64_t result =
+      (static_cast<int64_t>(x) * static_cast<int64_t>(multiplier) + round) >>
+      total_shift;
+  return static_cast<int32_t>(result);
+}
+
 template <typename Scalar>
 inline vint16m2_t RvvLoad8AndSubtractZeroPoint(const Scalar* src,
                                                Scalar zero_point, size_t vl) {
@@ -93,7 +103,11 @@ inline DstScalar RvvFinalizeQuantizedAccumulator(
     multiplier = params.multiplier_fixedpoint;
     shift = params.multiplier_exponent;
   }
-  acc = MultiplyByQuantizedMultiplier(acc, multiplier, shift);
+  if constexpr (std::is_same<DstScalar, std::int8_t>::value) {
+    acc = RvvApplyGemmQuantizedMultiplier(acc, multiplier, shift);
+  } else {
+    acc = MultiplyByQuantizedMultiplier(acc, multiplier, shift);
+  }
   acc += static_cast<int32_t>(dst_params.zero_point);
   acc = std::max(acc, static_cast<int32_t>(params.clamp_min));
   acc = std::min(acc, static_cast<int32_t>(params.clamp_max));
@@ -125,17 +139,25 @@ inline bool RvvFloatGemm(const MatrixParams<float>& lhs_params,
     float* dst_col = dst_data + col * rows;
     for (int row = 0; row < rows;) {
       const size_t vl = __riscv_vsetvl_e32m4(rows - row);
-      vfloat32m4_t acc = __riscv_vfmv_v_f_f32m4(0.0f, vl);
+      vfloat32m4_t acc_even = __riscv_vfmv_v_f_f32m4(0.0f, vl);
+      vfloat32m4_t acc_odd = __riscv_vfmv_v_f_f32m4(0.0f, vl);
       const float* lhs_block = lhs_data + row * depth;
       const ptrdiff_t lhs_stride =
           depth * static_cast<ptrdiff_t>(sizeof(float));
-      // Keep each output lane accumulating in depth order. Reducing across the
-      // depth dimension changes FP32 rounding enough to affect model precision.
+      // Keep FP32 close to Eigen scalar: avoid fused multiply-add and split
+      // the depth sum to reduce cancellation error in convolution outputs.
       for (int d = 0; d < depth; ++d) {
         const vfloat32m4_t lhs =
             __riscv_vlse32_v_f32m4(lhs_block + d, lhs_stride, vl);
-        acc = __riscv_vfmacc_vf_f32m4(acc, rhs_col[d], lhs, vl);
+        const vfloat32m4_t product =
+            __riscv_vfmul_vf_f32m4(lhs, rhs_col[d], vl);
+        if ((d & 1) == 0) {
+          acc_even = __riscv_vfadd_vv_f32m4(acc_even, product, vl);
+        } else {
+          acc_odd = __riscv_vfadd_vv_f32m4(acc_odd, product, vl);
+        }
       }
+      vfloat32m4_t acc = __riscv_vfadd_vv_f32m4(acc_even, acc_odd, vl);
       if (params.bias != nullptr) {
         const vfloat32m4_t bias = __riscv_vle32_v_f32m4(params.bias + row, vl);
         acc = __riscv_vfadd_vv_f32m4(acc, bias, vl);
