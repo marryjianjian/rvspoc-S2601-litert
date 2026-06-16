@@ -1,6 +1,6 @@
 # RVV Model Precision Summary
 
-Date: 2026-06-12
+Date: 2026-06-16
 
 This document records the current model-level RVV precision test method and the
 latest real-image input dump results.
@@ -8,7 +8,8 @@ latest real-image input dump results.
 ## Environment
 
 - Source directory: `/Users/plack/code/LiteRT`
-- Build directory: `/home/plack/build/riscv-clang-litert`
+- RISC-V build directory: `/home/plack/build/riscv-clang-litert`
+- ARM scalar reference build directory: `/home/plack/build/arm-litert`
 - Model directory: `/home/plack/rvspoc_model`
 - Image directory on macOS: `/Users/plack/Downloads/rvv_input_images`
 - Image directory on debian1: `/home/plack/rvspoc_model/images/bmp_224`
@@ -17,6 +18,8 @@ latest real-image input dump results.
 
 The tested binaries are:
 
+- ARM scalar reference:
+  `/home/plack/build/arm-litert/tensorflow-lite-rvv-model-precision-test`
 - RVV: `/home/plack/build/riscv-clang-litert/tflite_build/tensorflow-lite-rvv-model-precision-test`
 - no-RVV/scalar: `/home/plack/build/riscv-clang-litert/tflite_build/tensorflow-lite-rvv-model-precision-test-norvv`
 
@@ -109,14 +112,14 @@ If `--input_dump` is not provided, the test keeps the older synthetic input path
 
 Current compare setup:
 
-- reference binary: no-RVV binary
-- RVV candidate: RVV binary
-- scalar candidate: no-RVV binary
-- both reference and candidate runs are executed under the same qemu RVV CPU
+- reference binary: ARM scalar reference binary
+- RVV candidate: RISC-V RVV binary, executed with qemu RVV CPU settings
+- scalar candidate: RISC-V no-RVV/scalar binary, executed with qemu RVV CPU
   settings
 
-The scalar row is expected to match reference exactly because both use the same
-no-RVV binary.
+The ARM scalar reference build disables ARM NEON/vectorization and is used as
+the cross-architecture correctness baseline. The scalar row is therefore a real
+RISC-V scalar-vs-ARM scalar comparison, not a self-comparison.
 
 ## Precision Criteria
 
@@ -138,32 +141,34 @@ error; otherwise the relative error is infinity.
 
 ## Current Results
 
-The first complete real-image smoke run used `--samples=1`, so each model used
+The latest complete real-image smoke run used `--samples=1`, so each model used
 the first sample from its 6-sample dump.
 
-Raw output directories:
+Raw output directory:
 
-- `/tmp/rvv_real_dump_precision_smoke_20260612_165024`
-- `/tmp/rvv_real_dump_precision_remaining_20260612_165649`
+- `/tmp/six_models_arm_scalar_ref_precision_20260616_181416`
 
 | Model | Kind | RVV result | RVV top1 mismatch | RVV max abs | RVV max rel | RVV max LSB | Scalar result |
 |---|---|---:|---:|---:|---:|---:|---:|
-| EfficientNet Lite0 FP32 | FP32 | PASS | 0.000% | 0.000001401 | 0.000009676 | 0 | PASS |
+| EfficientNet Lite0 FP32 | FP32 | PASS | 0.000% | 0.000001371 | 0.000006962 | 0 | PASS |
 | EfficientNet Lite0 INT8 | INT8 | PASS | 0.000% | 0.000000000 | 0.000000000 | 0 | PASS |
-| MobileNet V1 FP32 | FP32 | FAIL | 0.000% | 0.000003695 | 0.000038881 | 0 | PASS |
+| MobileNet V1 FP32 | FP32 | PASS | 0.000% | 0.000001609 | 0.000008634 | 0 | PASS |
 | MobileNet V1 Quant | INT8 | PASS | 0.000% | 0.000000000 | 0.000000000 | 0 | PASS |
-| MobileNet V2 FP32 | FP32 | FAIL | 0.000% | 0.000000454 | 0.000018661 | 0 | PASS |
+| MobileNet V2 FP32 | FP32 | PASS | 0.000% | 0.000001192 | 0.000008284 | 0 | PASS |
 | MobileNet V2 Quant | INT8 | PASS | 0.000% | 0.000000000 | 0.000000000 | 0 | PASS |
 
 ## Observations
 
 - The real dump read path works for all six models.
-- All quantized models passed with `max_lsb=0`.
-- EfficientNet Lite0 FP32 passed the strict `1e-5` relative-error threshold.
-- MobileNet V1 FP32 and MobileNet V2 FP32 preserved top-1 but exceeded the
-  strict elementwise relative-error threshold.
-- The scalar row passed for every model, as expected, because it compares the
-  no-RVV binary against itself.
+- All quantized models passed with `max_lsb=0` for both RVV and RISC-V scalar.
+- All three FP32 models passed the strict `1e-5` relative-error threshold for
+  RVV, and RISC-V scalar matched ARM scalar exactly in this run.
+- The previous MobileNet FP32 failures were fixed by changing RVV FP32 GEMM to
+  avoid fused multiply-add and to use an even/odd partial-sum accumulation
+  strategy.
+- The previous EfficientNet Lite0 INT8 RVV failure was fixed by changing the
+  direct RVV per-channel Conv2D requantization path to use the same
+  single-rounding behavior as the ARM scalar reference path.
 - A full 6-sample run was attempted first, but EfficientNet Lite0 FP32 no-RVV
   reference execution under qemu was too slow. It was stopped after several
   minutes while still in the first model's reference run. The current recorded
@@ -172,9 +177,6 @@ Raw output directories:
 
 ## Next Steps
 
-- Record the exact output index and element index for the FP32 maximum relative
-  error so the failing MobileNet FP32 cases can be traced back to specific
-  output values.
 - Add an optional mode that stores only summary statistics instead of full output
   vectors, so 6-sample real-image runs are cheaper under qemu.
 - Run the full 6-sample suite once the runtime cost is reduced or when real
