@@ -20,6 +20,11 @@ set(NEUROPILOT_HEADERS_DIR "" CACHE PATH "Path to pre-downloaded NeuroPilot head
 set(QAIRT_HEADERS_DIR "" CACHE PATH "Path to pre-downloaded QAIRT/QNN headers (root containing Qnn*.h)")
 set(LITECORE_HEADERS_DIR "" CACHE PATH "Path to Samsung AI LiteCore headers (root containing graph_wrapper_api.h)")
 
+if(DEFINED LITERT_ENABLE_NPU AND NOT LITERT_ENABLE_NPU)
+  message(STATUS "Skipping LiteRT vendor NPU dispatch builds: LITERT_ENABLE_NPU=OFF")
+  return()
+endif()
+
 if(NOT NEUROPILOT_HEADERS_DIR)
   if(NOT NEUROPILOT_HEADERS_URL AND NOT NEUROPILOT_GIT_REPO)
     set(NEUROPILOT_HEADERS_URL "https://s3.ap-southeast-1.amazonaws.com/mediatek.neuropilot.com/66f2c33a-2005-4f0b-afef-2053c8654e4f.gz")

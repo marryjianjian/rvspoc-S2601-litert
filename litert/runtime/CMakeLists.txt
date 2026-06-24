@@ -19,7 +19,6 @@ set(LITERT_RUNTIME_SOURCES
     accelerator_registry.cc
     accelerators/auto_registration.cc
     accelerators/dispatch/dispatch_accelerator.cc
-    accelerators/xnnpack/xnnpack_accelerator.cc
     ahwb_buffer.cc
     ahwb_wrapper.cc
     compiled_model.cc
@@ -61,11 +60,18 @@ add_library(litert_runtime STATIC ${LITERT_RUNTIME_SOURCES})
 set(LITERT_XNNPACK_INCLUDE_DIR "${CMAKE_BINARY_DIR}/xnnpack/include" CACHE PATH "Path to XNNPACK public headers used by LiteRT")
 set(LITERT_PTHREADPOOL_INCLUDE_DIR "${CMAKE_BINARY_DIR}/pthreadpool-source/include" CACHE PATH "Path to pthreadpool headers used by LiteRT")
 
+if(TFLITE_ENABLE_XNNPACK)
+  target_sources(litert_runtime PRIVATE accelerators/xnnpack/xnnpack_accelerator.cc)
+  target_compile_definitions(litert_runtime PRIVATE LITERT_USE_XNNPACK)
+endif()
+
 # Optional GPU-related sources
 if(APPLE)
   target_sources(litert_runtime PRIVATE metal_info.cc)
 endif()
-target_sources(litert_runtime PRIVATE open_cl_memory.cc open_cl_sync.cc)
+if(LITERT_ENABLE_GPU)
+  target_sources(litert_runtime PRIVATE open_cl_memory.cc open_cl_sync.cc)
+endif()
 
 # Link Apple frameworks for Metal and OpenGL interop
 if(APPLE)
@@ -73,18 +79,14 @@ if(APPLE)
   target_link_libraries(litert_runtime PRIVATE "-framework Metal" "-framework Foundation" "-framework OpenGL")
 endif()
 
-target_compile_options(litert_runtime PRIVATE
-    -DLITERT_USE_XNNPACK
-)
-
 target_include_directories(litert_runtime
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../..>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../..>
         $<BUILD_INTERFACE:${TENSORFLOW_SOURCE_DIR}>
-        $<BUILD_INTERFACE:${LITERT_XNNPACK_INCLUDE_DIR}>
-        $<BUILD_INTERFACE:${LITERT_PTHREADPOOL_INCLUDE_DIR}>
-        $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/opencl_headers>
+        $<$<BOOL:${TFLITE_ENABLE_XNNPACK}>:$<BUILD_INTERFACE:${LITERT_XNNPACK_INCLUDE_DIR}>>
+        $<$<BOOL:${TFLITE_ENABLE_XNNPACK}>:$<BUILD_INTERFACE:${LITERT_PTHREADPOOL_INCLUDE_DIR}>>
+        $<$<BOOL:${LITERT_ENABLE_GPU}>:$<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/opencl_headers>>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
 )

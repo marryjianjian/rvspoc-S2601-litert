@@ -279,7 +279,11 @@ Expected<void> LiteRtCompiledModelT::InitializeRuntime(
           kLiteRtStatusOk) {
         LITERT_LOG(LITERT_WARNING, "Failed to parse CPU options");
       } else {
+#if defined(LITERT_USE_XNNPACK)
         num_threads = cpu_options.xnn.num_threads;
+#else
+        num_threads = cpu_options.num_threads;
+#endif
         use_non_xnnpack_cpu_backend =
             cpu_options.kernel_mode != kLiteRtCpuKernelModeXnnpack;
         use_reference_cpu_kernels =

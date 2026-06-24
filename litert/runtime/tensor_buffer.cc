@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-#ifndef LITERT_DISABLE_CPU
+#if defined(LITERT_USE_XNNPACK)
 #include "xnnpack.h"  // from @XNNPACK
 #else
 #define XNN_EXTRA_BYTES 16

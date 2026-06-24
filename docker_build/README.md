@@ -59,6 +59,52 @@ To browse outputs from inside a container shell, run (from the repo root):
 docker run --rm -it --user $(id -u):$(id -g) -e HOME=/litert_build -e USER=$(id -un) -v $(pwd):/litert_build litert_build_env bash
 ```
 
+## Building RISC-V 64-bit Targets
+
+The Android/Bazel image in `hermetic_build.Dockerfile` is separate from the
+RISC-V cross-compilation image. By default, the RISC-V wrapper builds the
+current LiteRT CMake project under `litert/`:
+
+```
+./docker_build/build_riscv64_with_docker.sh --clean
+```
+
+This command:
+
+- Builds the `litert_riscv64_build_env` Docker image from
+  `docker_build/riscv64_build.Dockerfile`
+- Configures CMake with `docker_build/cmake/riscv64-linux-gnu.cmake`
+- Configures `litert/` for `riscv64` Linux with GPU/NPU/XNNPACK/RVV disabled by
+  default
+- Cross-compiles the `run_model` target
+- Verifies the executable with `file` and `riscv64-linux-gnu-readelf`
+- Runs `run_model --help` under `qemu-riscv64`
+
+Useful variants:
+
+```
+# Reuse an existing image and rebuild the default LiteRT target.
+./docker_build/build_riscv64_with_docker.sh --use_existing_image
+
+# Build a different LiteRT CMake target.
+./docker_build/build_riscv64_with_docker.sh --use_existing_image --target analyze_model
+
+# Build without running QEMU.
+./docker_build/build_riscv64_with_docker.sh --use_existing_image --no-qemu
+
+# Build and QEMU-test the lightweight smoke target instead of litert/run_model.
+./docker_build/build_riscv64_with_docker.sh --mode smoke --use_existing_image
+
+# Try the RVV path explicitly. This requires compiler intrinsics compatible
+# with the RVV code in the tree.
+TFLITE_ENABLE_RVV=ON RISCV64_MARCH=rv64gcv \
+  LITERT_RISCV64_QEMU_CPU=rv64,v=true,vlen=256,elen=64 \
+  ./docker_build/build_riscv64_with_docker.sh --mode smoke --use_existing_image
+```
+
+LiteRT project build outputs are left under `build-riscv64-litert/` on the
+host. Smoke build outputs are left under `build-riscv64/`.
+
 ## How It Works
 
 The Docker environment:

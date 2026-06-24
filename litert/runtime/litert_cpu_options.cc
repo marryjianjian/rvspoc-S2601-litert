@@ -84,24 +84,40 @@ LiteRtStatus ParseLiteRtCpuOptions(const void* data, size_t size,
           LITERT_RETURN_IF_ERROR(
               ParseCpuKernelMode(value, &options->kernel_mode));
         } else if (key == "num_threads") {
+#if defined(LITERT_USE_XNNPACK)
           LITERT_ASSIGN_OR_RETURN(options->xnn.num_threads,
                                   litert::internal::ParseTomlInt(value));
+#else
+          LITERT_ASSIGN_OR_RETURN(options->num_threads,
+                                  litert::internal::ParseTomlInt(value));
+#endif
         } else if (key == "flags") {
           LITERT_ASSIGN_OR_RETURN(auto val,
                                   litert::internal::ParseTomlInt(value));
+#if defined(LITERT_USE_XNNPACK)
           options->xnn.flags = val;
+#else
+          options->flags = val;
+#endif
         } else if (key == "weight_cache_file_path") {
           absl::string_view path = value;
           if (path.size() >= 2 && path.front() == '"' && path.back() == '"') {
             path = path.substr(1, path.size() - 2);
           }
           options->weight_cache_file_path_buffer = std::string(path);
+#if defined(LITERT_USE_XNNPACK)
           options->xnn.weight_cache_file_path =
               options->weight_cache_file_path_buffer.c_str();
+#endif
 
         } else if (key == "weight_cache_file_descriptor") {
+#if defined(LITERT_USE_XNNPACK)
           LITERT_ASSIGN_OR_RETURN(options->xnn.weight_cache_file_descriptor,
                                   litert::internal::ParseTomlInt(value));
+#else
+          LITERT_ASSIGN_OR_RETURN(options->weight_cache_file_descriptor,
+                                  litert::internal::ParseTomlInt(value));
+#endif
         }
         return kLiteRtStatusOk;
       });

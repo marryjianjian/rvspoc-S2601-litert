@@ -19,14 +19,22 @@
 
 #include "litert/c/litert_common.h"
 #include "litert/c/options/litert_cpu_options.h"
+#if defined(LITERT_USE_XNNPACK)
 #include "tflite/delegates/xnnpack/xnnpack_delegate.h"
+#endif
 
 // Internal LiteRt CPU options struct. This data structure is used to
 // pass CPU options to the interpreter and will be used in the framework
 // code.
 struct LiteRtCpuOptionsT {
   LiteRtCpuKernelMode kernel_mode = kLiteRtCpuKernelModeXnnpack;
+#if defined(LITERT_USE_XNNPACK)
   TfLiteXNNPackDelegateOptions xnn = TfLiteXNNPackDelegateOptionsDefault();
+#else
+  int num_threads = 1;
+  int flags = 0;
+  int weight_cache_file_descriptor = -1;
+#endif
   // We need to keep the string alive because `TfLiteXNNPackDelegateOptions`
   // expects a `const char*` for `weight_cache_file_path` and does not manage
   // its memory.
